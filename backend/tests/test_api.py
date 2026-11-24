@@ -1139,3 +1139,178 @@ def test_multi_teacher_print_approval_routing(client: TestClient):
     assert r_ta_approve.json()["status"] == "QUEUED"
 
 
+def test_filament_api_settings_sync_and_slicer_auto_change(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """FilamentAPI settings, health test, manual sync, and auto-filament change during slicing."""
+    from app.schemas import FilamentApiHealthOut, FilamentApiPrinterOut
+    from app.services import filament_api
+
+    admin_token = _login(client, "admin", "admin123")["access_token"]
+    student_token = _login(client, "2345678", "student123")["access_token"]
+
+    # 1. Default settings have FilamentAPI disabled
+    r_cfg = client.get("/api/admin/settings", headers=_auth_header(admin_token))
+    assert r_cfg.status_code == 200
+    cfg = r_cfg.json()
+    assert cfg["filament_api_enabled"] is False
+    assert cfg["filament_api_url"] == "http://filament-api:8000"
+
+    # Syncing while disabled returns 400 FILAMENT_API_DISABLED
+    r_disabled = client.post(
+        "/api/admin/printers/sync-filaments",
+        headers=_auth_header(admin_token),
+    )
+    assert r_disabled.status_code == 400
+    assert r_disabled.json()["detail"]["code"] == "FILAMENT_API_DISABLED"
+
+    # 2. Mock FilamentApiClient responses
+    mock_state: dict[str, str | None] = {
+        "prusa-mk35": "PETG",
+        "klip": "PLA",
+    }
+
+    async def _fake_check_health(self):
+        return FilamentApiHealthOut(
+            ok=True,
+            status="ok",
+            printers_configured=2,
+            uptime_seconds=42.5,
+            printers=[
+                FilamentApiPrinterOut(id="prusa-mk35", type="prusalink", host="http://192.168.4.232"),
+                FilamentApiPrinterOut(id="klip", type="klipper", host="http://pi-klipper2.local"),
+            ],
+        )
+
+    async def _fake_list_printers(self):
+        return [
+            FilamentApiPrinterOut(id="prusa-mk35", type="prusalink", host="http://192.168.4.232"),
+            FilamentApiPrinterOut(id="klip", type="klipper", host="http://pi-klipper2.local"),
+        ]
+
+    async def _fake_get_filament(self, printer_id: str):
+        if printer_id not in mock_state:
+            raise filament_api.FilamentApiError(f"Printer '{printer_id}' not found")
+        return mock_state[printer_id]
+
+    monkeypatch.setattr(filament_api.FilamentApiClient, "check_health", _fake_check_health)
+    monkeypatch.setattr(filament_api.FilamentApiClient, "list_printers", _fake_list_printers)
+    monkeypatch.setattr(filament_api.FilamentApiClient, "get_filament", _fake_get_filament)
+
+    # Test connection endpoint
+    r_test = client.post(
+        "/api/admin/filament-api/test",
+        headers=_auth_header(admin_token),
+        json={"url": "http://10.0.0.5:8000"},
+    )
+    assert r_test.status_code == 200
+    test_body = r_test.json()
+    assert test_body["ok"] is True
+    assert test_body["printers_configured"] == 2
+    assert len(test_body["printers"]) == 2
+
+    # Enable FilamentAPI in settings
+    r_patch_cfg = client.patch(
+        "/api/admin/settings",
+        headers=_auth_header(admin_token),
+        json={"filament_api_enabled": True, "filament_api_url": "http://10.0.0.5:8000"},
+    )
+    assert r_patch_cfg.status_code == 200
+    assert r_patch_cfg.json()["filament_api_enabled"] is True
+    assert r_patch_cfg.json()["filament_api_url"] == "http://10.0.0.5:8000"
+
+    # List FilamentAPI printers
+    r_fap = client.get("/api/admin/filament-api/printers", headers=_auth_header(admin_token))
+    assert r_fap.status_code == 200
+    assert {p["id"] for p in r_fap.json()} == {"prusa-mk35", "klip"}
+
+    # 3. Map Prusa MK3.5 (initially loaded with PLA Bleu Gérald-Godin) to FilamentAPI ID "prusa-mk35"
+    admin_printers = client.get("/api/admin/printers", headers=_auth_header(admin_token)).json()
+    mk35 = next(p for p in admin_printers if p["fdm_monster_id"] == "prusalink-mk35-1")
+    assert mk35["slots"][0]["filament_name"] == "PLA Bleu Gérald-Godin"
+
+    r_map = client.patch(
+        f"/api/admin/printers/{mk35['id']}",
+        headers=_auth_header(admin_token),
+        json={"filament_api_printer_id": "prusa-mk35"},
+    )
+    assert r_map.status_code == 200
+    assert r_map.json()["filament_api_printer_id"] == "prusa-mk35"
+
+    # 4. Slicer auto-changes filament when slicing (prusa-mk35 currently reports "PETG")
+    stl_bytes = _make_stl_bytes(extents=(25.0, 25.0, 15.0))
+    r_up = client.post(
+        "/api/jobs/upload",
+        headers=_auth_header(student_token),
+        files={"file": ("bracket.stl", stl_bytes, "application/octet-stream")},
+        data={"printer_id": str(mk35["id"]), "slot_id": str(mk35["slots"][0]["id"])},
+    )
+    assert r_up.status_code == 201
+    job_id = r_up.json()["id"]
+    assert r_up.json()["filament_material"] == "PLA"
+
+    r_slice = client.post(
+        f"/api/jobs/{job_id}/slice",
+        headers=_auth_header(student_token),
+        json={
+            "printer_id": mk35["id"],
+            "slot_id": mk35["slots"][0]["id"],
+            "pos_x_mm": 0.0,
+            "pos_y_mm": 0.0,
+            "quat_x": 0.0,
+            "quat_y": 0.0,
+            "quat_z": 0.0,
+            "quat_w": 1.0,
+            "scale": 1.0,
+            "supports_enabled": True,
+        },
+    )
+    assert r_slice.status_code == 200, r_slice.text
+    sliced = r_slice.json()
+    assert sliced["filament_material"] == "PETG"
+    assert sliced["filament_name"] == "PETG Orange"
+
+    # 5. Manual sync when printer switches to "PLA Vert" (exact name) and then unloaded (None)
+    mock_state["prusa-mk35"] = "PLA Vert"
+    r_sync1 = client.post(
+        "/api/admin/printers/sync-filaments",
+        headers=_auth_header(admin_token),
+    )
+    assert r_sync1.status_code == 200
+    sync1 = r_sync1.json()
+    assert sync1["synced_count"] == 1
+    assert sync1["changed_count"] == 1
+    assert sync1["results"][0]["matched_filament_name"] == "PLA Vert"
+    assert sync1["results"][0]["status"] == "updated"
+
+    # When API reports generic "PLA", keep existing "PLA Vert" instead of overwriting
+    mock_state["prusa-mk35"] = "PLA"
+    r_sync2 = client.post(
+        "/api/admin/printers/sync-filaments",
+        headers=_auth_header(admin_token),
+    )
+    assert r_sync2.status_code == 200
+    sync2 = r_sync2.json()
+    assert sync2["changed_count"] == 0
+    assert sync2["results"][0]["matched_filament_name"] == "PLA Vert"
+    assert sync2["results"][0]["status"] == "unchanged"
+
+    # When API reports null (unloaded), mark slot as unloaded
+    mock_state["prusa-mk35"] = None
+    r_sync3 = client.post(
+        "/api/admin/printers/sync-filaments",
+        headers=_auth_header(admin_token),
+    )
+    assert r_sync3.status_code == 200
+    sync3 = r_sync3.json()
+    assert sync3["changed_count"] == 1
+    assert sync3["results"][0]["status"] == "unloaded"
+
+    updated_printers = client.get("/api/admin/printers", headers=_auth_header(admin_token)).json()
+    mk35_after = next(p for p in updated_printers if p["id"] == mk35["id"])
+    assert mk35_after["slots"][0]["is_loaded"] is False
+    assert mk35_after["slots"][0]["filament_id"] is None
+
+
+

@@ -14,6 +14,7 @@ import { formatMinutes, useI18n } from '../../i18n';
 import type {
   AdminPrinter,
   Filament,
+  FilamentApiPrinter,
   OrcaProfile,
   TestSliceResult,
 } from '../../types/api';
@@ -24,6 +25,8 @@ interface AdminPrintersTabProps {
   printers: AdminPrinter[];
   filaments: Filament[];
   profiles: OrcaProfile[];
+  filamentApiEnabled: boolean;
+  filamentApiPrinters: FilamentApiPrinter[];
   onReload: () => Promise<void>;
   onError: (msg: string) => void;
 }
@@ -32,11 +35,15 @@ export function AdminPrintersTab({
   printers,
   filaments,
   profiles,
+  filamentApiEnabled,
+  filamentApiPrinters,
   onReload,
   onError,
 }: AdminPrintersTabProps) {
   const { lang, t } = useI18n();
   const [syncing, setSyncing] = useState(false);
+  const [syncingFilaments, setSyncingFilaments] = useState(false);
+  const [filamentSyncNote, setFilamentSyncNote] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
@@ -75,6 +82,28 @@ export function AdminPrintersTab({
     }
   };
 
+  const handleSyncFilaments = async () => {
+    setSyncingFilaments(true);
+    setFilamentSyncNote(null);
+    try {
+      const res = await api.adminSyncPrinterFilaments();
+      if (res.synced_count === 0) {
+        setFilamentSyncNote(t.admin.printers.syncFilamentsNone);
+      } else {
+        setFilamentSyncNote(
+          t.admin.printers.syncFilamentsSummary
+            .replace('{synced}', String(res.synced_count))
+            .replace('{changed}', String(res.changed_count))
+        );
+      }
+      await onReload();
+    } catch (err) {
+      onError(translateApiError(err, t));
+    } finally {
+      setSyncingFilaments(false);
+    }
+  };
+
   const handleSavePrinter = async (printer: AdminPrinter) => {
     const d = getDraft(printer);
     setSavingId(printer.id);
@@ -88,6 +117,7 @@ export function AdminPrintersTab({
         mmu_slots_count: Number(d.mmu_slots_count),
         machine_profile_id: d.machine_profile_id ?? null,
         process_profile_id: d.process_profile_id ?? null,
+        filament_api_printer_id: d.filament_api_printer_id?.trim() || null,
       });
       setDrafts((prev) => {
         const next = { ...prev };
@@ -216,16 +246,45 @@ export function AdminPrintersTab({
         <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
           {t.admin.tabs.printers}
         </h2>
-        <button
-          type="button"
-          onClick={handleSync}
-          disabled={syncing}
-          className="btn-secondary"
-        >
-          <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
-          {syncing ? t.admin.printers.syncing : t.admin.printers.syncBtn}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {(filamentApiEnabled || printers.some((p) => p.filament_api_printer_id)) && (
+            <button
+              type="button"
+              onClick={handleSyncFilaments}
+              disabled={syncingFilaments}
+              className="btn-secondary"
+            >
+              <RefreshCw className={`h-4 w-4 ${syncingFilaments ? 'animate-spin' : ''}`} />
+              {syncingFilaments
+                ? t.admin.printers.syncingFilaments
+                : t.admin.printers.syncFilamentsBtn}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleSync}
+            disabled={syncing}
+            className="btn-secondary"
+          >
+            <RefreshCw className={`h-4 w-4 ${syncing ? 'animate-spin' : ''}`} />
+            {syncing ? t.admin.printers.syncing : t.admin.printers.syncBtn}
+          </button>
+        </div>
       </div>
+
+      {filamentSyncNote && (
+        <div className="rounded-xl bg-[#00A7D9]/10 px-3.5 py-2 text-xs font-medium text-[#007BA3] dark:text-[#38C6F4]">
+          {filamentSyncNote}
+        </div>
+      )}
+
+      <datalist id="filament-api-printers-list">
+        {filamentApiPrinters.map((fp) => (
+          <option key={fp.id} value={fp.id}>
+            {fp.id} ({fp.type})
+          </option>
+        ))}
+      </datalist>
 
       <div className="space-y-4">
         {printers.map((printer) => {
@@ -309,8 +368,8 @@ export function AdminPrintersTab({
                 </div>
               </div>
 
-              {/* Dimensions, MMU Count, Orca Profile Bindings */}
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {/* Dimensions, MMU Count, Orca Profile Bindings, FilamentAPI Mapping */}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
                 <div>
                   <label className="mb-1 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
                     {t.admin.printers.bedSize}
@@ -469,6 +528,24 @@ export function AdminPrintersTab({
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
+                    {t.admin.printers.filamentApiId}
+                  </label>
+                  <input
+                    type="text"
+                    list="filament-api-printers-list"
+                    value={d.filament_api_printer_id ?? ''}
+                    placeholder={t.admin.printers.filamentApiIdPlaceholder}
+                    onChange={(e) =>
+                      updateDraft(printer.id, {
+                        filament_api_printer_id: e.target.value,
+                      })
+                    }
+                    className="studio-input py-1.5 font-mono text-xs"
+                  />
                 </div>
               </div>
 

@@ -190,6 +190,7 @@ export interface AdminPrinter {
   has_mmu: boolean;
   machine_profile_id: number | null;
   process_profile_id: number | null;
+  filament_api_printer_id?: string | null;
   slots: PrinterSlot[];
 }
 
@@ -325,4 +326,39 @@ export interface SystemSettings {
   fdm_monster_api_key: string;
   slicer_mode: 'mock' | 'orcaslicer';
   orca_cli_path: string;
+  filament_api_enabled: boolean;
+  filament_api_url: string;
+}
+
+export interface FilamentApiPrinter {
+  id: string;
+  type: string;
+  host: string;
+}
+
+export interface FilamentApiHealth {
+  ok: boolean;
+  status: string;
+  printers_configured: number;
+  uptime_seconds?: number | null;
+  printers: FilamentApiPrinter[];
+  error?: string | null;
+}
+
+export interface FilamentSyncPrinterResult {
+  printer_id: number;
+  printer_name: string;
+  filament_api_printer_id: string;
+  detected_filament?: string | null;
+  matched_filament_id?: number | null;
+  matched_filament_name?: string | null;
+  changed: boolean;
+  status: 'updated' | 'unchanged' | 'unloaded' | 'unmatched' | 'error';
+  error?: string | null;
+}
+
+export interface FilamentSyncResponse {
+  synced_count: number;
+  changed_count: number;
+  results: FilamentSyncPrinterResult[];
 }

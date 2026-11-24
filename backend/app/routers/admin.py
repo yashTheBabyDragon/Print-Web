@@ -46,9 +46,13 @@ from app.schemas import (
     ClassDeleteOut,
     ClassEnrollmentOut,
     ClassStudentRemoveOut,
+    FilamentApiHealthOut,
+    FilamentApiPrinterOut,
+    FilamentApiTestRequest,
     FilamentCreate,
     FilamentOut,
     FilamentPatch,
+    FilamentSyncResponse,
     JobDetail,
     OrcaProfileOut,
     PendingAccountOut,
@@ -72,6 +76,11 @@ from app.services.budget import (
     get_system_settings,
 )
 from app.services.fdm_monster import FdmMonsterError, get_fdm_adapter
+from app.services.filament_api import (
+    FilamentApiClient,
+    FilamentApiError,
+    sync_all_printers_filaments,
+)
 from app.services.profiles import (
     delete_profile_file,
     save_profile_file,
@@ -541,6 +550,9 @@ def admin_patch_printer(
         printer.machine_profile_id = body.machine_profile_id
     if "process_profile_id" in fields:
         printer.process_profile_id = body.process_profile_id
+    if "filament_api_printer_id" in fields:
+        cleaned_api_id = (body.filament_api_printer_id or "").strip()
+        printer.filament_api_printer_id = cleaned_api_id or None
 
     if "mmu_slots_count" in fields and body.mmu_slots_count is not None:
         target_count = body.mmu_slots_count
@@ -1711,7 +1723,59 @@ def admin_patch_settings(
         sys_settings.slicer_mode = body.slicer_mode
     if "orca_cli_path" in fields and body.orca_cli_path is not None:
         sys_settings.orca_cli_path = body.orca_cli_path.strip()
+    if "filament_api_enabled" in fields and body.filament_api_enabled is not None:
+        sys_settings.filament_api_enabled = body.filament_api_enabled
+    if "filament_api_url" in fields and body.filament_api_url is not None:
+        sys_settings.filament_api_url = body.filament_api_url.strip()
 
     db.commit()
     db.refresh(sys_settings)
     return serialize_settings(sys_settings)
+
+
+# ---------------------------------------------------------------------------
+# FilamentAPI Integration
+# ---------------------------------------------------------------------------
+
+@router.post("/filament-api/test", response_model=FilamentApiHealthOut)
+async def admin_test_filament_api(
+    body: Optional[FilamentApiTestRequest] = None,
+    _super_admin: User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+) -> FilamentApiHealthOut:
+    """Test connectivity to FilamentAPI using the provided URL or saved setting."""
+    sys_settings = get_system_settings(db)
+    target_url = (body.url if body and body.url else sys_settings.filament_api_url) or ""
+    client = FilamentApiClient(base_url=target_url)
+    return await client.check_health()
+
+
+@router.get("/filament-api/printers", response_model=list[FilamentApiPrinterOut])
+async def admin_list_filament_api_printers(
+    _staff: User = Depends(require_staff),
+    db: Session = Depends(get_db),
+) -> list[FilamentApiPrinterOut]:
+    """List printers configured in FilamentAPI for mapping in the admin panel."""
+    sys_settings = get_system_settings(db)
+    if not sys_settings.filament_api_enabled or not (sys_settings.filament_api_url or "").strip():
+        return []
+    client = FilamentApiClient(base_url=sys_settings.filament_api_url)
+    try:
+        return await client.list_printers()
+    except FilamentApiError:
+        return []
+
+
+@router.post("/printers/sync-filaments", response_model=FilamentSyncResponse)
+async def admin_sync_printer_filaments(
+    _staff: User = Depends(require_staff),
+    db: Session = Depends(get_db),
+) -> FilamentSyncResponse:
+    """Query FilamentAPI for all mapped printers and update their loaded filaments."""
+    sys_settings = get_system_settings(db)
+    if not sys_settings.filament_api_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "FILAMENT_API_DISABLED", "message": "FilamentAPI auto-sync is disabled in settings"},
+        )
+    return await sync_all_printers_filaments(db, sys_settings)

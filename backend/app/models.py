@@ -78,6 +78,8 @@ class SystemSettings(Base):
     fdm_monster_api_key: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     slicer_mode: Mapped[str] = mapped_column(String(32), default="mock", nullable=False)
     orca_cli_path: Mapped[str] = mapped_column(String(255), default="orca-slicer", nullable=False)
+    filament_api_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    filament_api_url: Mapped[str] = mapped_column(String(255), default="http://filament-api:8000", nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -222,6 +224,7 @@ class Printer(Base):
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     display_name: Mapped[str] = mapped_column(String(150), nullable=False)
     fdm_monster_id: Mapped[str] = mapped_column(String(120), unique=True, index=True, nullable=False)
+    filament_api_printer_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     printer_type: Mapped[str] = mapped_column(String(32), default=PrinterType.PRUSALINK.value, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default=PrinterStatus.IDLE.value, nullable=False)
     queue_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

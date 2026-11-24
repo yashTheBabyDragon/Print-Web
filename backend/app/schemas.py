@@ -142,6 +142,7 @@ class AdminPrinterOut(PrinterOut):
     is_enabled: bool
     machine_profile_id: Optional[int] = None
     process_profile_id: Optional[int] = None
+    filament_api_printer_id: Optional[str] = None
 
 
 class AdminPrinterPatch(BaseModel):
@@ -153,6 +154,7 @@ class AdminPrinterPatch(BaseModel):
     mmu_slots_count: Optional[int] = Field(default=None, ge=1, le=16)
     machine_profile_id: Optional[int] = None
     process_profile_id: Optional[int] = None
+    filament_api_printer_id: Optional[str] = Field(default=None, max_length=120)
 
 
 class PrinterSlotUpdate(BaseModel):
@@ -541,6 +543,8 @@ class SystemSettingsOut(BaseModel):
     has_fdm_monster_api_key: bool
     slicer_mode: Literal["mock", "orcaslicer"]
     orca_cli_path: str
+    filament_api_enabled: bool
+    filament_api_url: str
 
 
 class SystemSettingsPatch(BaseModel):
@@ -554,3 +558,44 @@ class SystemSettingsPatch(BaseModel):
     fdm_monster_api_key: Optional[str] = Field(default=None, max_length=255)
     slicer_mode: Optional[Literal["mock", "orcaslicer"]] = None
     orca_cli_path: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    filament_api_enabled: Optional[bool] = None
+    filament_api_url: Optional[str] = Field(default=None, max_length=255)
+
+
+# --- FilamentAPI Integration ---
+
+class FilamentApiPrinterOut(BaseModel):
+    id: str
+    type: str
+    host: str
+
+
+class FilamentApiTestRequest(BaseModel):
+    url: Optional[str] = Field(default=None, max_length=255)
+
+
+class FilamentApiHealthOut(BaseModel):
+    ok: bool
+    status: str
+    printers_configured: int = 0
+    uptime_seconds: Optional[float] = None
+    printers: list[FilamentApiPrinterOut] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class FilamentSyncPrinterResult(BaseModel):
+    printer_id: int
+    printer_name: str
+    filament_api_printer_id: str
+    detected_filament: Optional[str] = None
+    matched_filament_id: Optional[int] = None
+    matched_filament_name: Optional[str] = None
+    changed: bool = False
+    status: Literal["updated", "unchanged", "unloaded", "unmatched", "error"]
+    error: Optional[str] = None
+
+
+class FilamentSyncResponse(BaseModel):
+    synced_count: int
+    changed_count: int
+    results: list[FilamentSyncPrinterResult] = Field(default_factory=list)

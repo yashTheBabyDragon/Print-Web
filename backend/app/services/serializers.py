@@ -57,6 +57,7 @@ def serialize_admin_printer(printer: Printer) -> AdminPrinterOut:
         is_enabled=printer.is_enabled,
         machine_profile_id=printer.machine_profile_id,
         process_profile_id=printer.process_profile_id,
+        filament_api_printer_id=printer.filament_api_printer_id,
     )
 
 
@@ -150,4 +151,6 @@ def serialize_settings(sys_settings: SystemSettings) -> SystemSettingsOut:
         has_fdm_monster_api_key=bool(raw_key),
         slicer_mode=sys_settings.slicer_mode,  # type: ignore[arg-type]
         orca_cli_path=sys_settings.orca_cli_path,
+        filament_api_enabled=sys_settings.filament_api_enabled,
+        filament_api_url=sys_settings.filament_api_url,
     )

@@ -35,6 +35,7 @@ from app.services.budget import (
     get_system_settings,
 )
 from app.services.fdm_monster import FdmMonsterError, get_fdm_adapter
+from app.services.filament_api import sync_printer_filament
 from app.services.serializers import serialize_job
 from app.services.slicer import (
     OutOfBoundsError,
@@ -247,7 +248,7 @@ def get_job_oriented_mesh(
 
 
 @router.post("/{job_id}/slice", response_model=JobDetail)
-def slice_job(
+async def slice_job(
     job_id: int,
     payload: TransformPayload,
     current_user: User = Depends(get_current_user),
@@ -263,6 +264,13 @@ def slice_job(
         )
 
     printer, slot = _validate_printer_and_slot(db, payload.printer_id, payload.slot_id)
+
+    if (
+        sys_settings.filament_api_enabled
+        and printer.filament_api_printer_id
+        and (printer.mmu_slots_count <= 1 or slot.slot_index == 1)
+    ):
+        await sync_printer_filament(db, printer, sys_settings, target_slot=slot)
 
     job_dir = Path(job.oriented_stl_path).parent
     stem = Path(job.original_filename).stem

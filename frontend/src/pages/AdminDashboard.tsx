@@ -17,6 +17,7 @@ import type {
   AdminTeacher,
   ApprovalsResponse,
   Filament,
+  FilamentApiPrinter,
   OrcaProfile,
   PendingAccountRequest,
   StudentAccount,
@@ -60,11 +61,12 @@ export function AdminDashboard() {
     history: [],
   });
   const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [filamentApiPrinters, setFilamentApiPrinters] = useState<FilamentApiPrinter[]>([]);
 
   const reloadAll = useCallback(async () => {
     setError(null);
     try {
-      const [p, f, pr, cl, st, ap, ar, te, se] = await Promise.all([
+      const [p, f, pr, cl, st, ap, ar, te, se, fap] = await Promise.all([
         api.adminGetPrinters(),
         api.adminGetFilaments(),
         api.adminGetProfiles(),
@@ -74,6 +76,7 @@ export function AdminDashboard() {
         api.adminGetAccountRequests(),
         isSuperAdmin ? api.adminGetTeachers() : Promise.resolve<AdminTeacher[]>([]),
         isSuperAdmin ? api.adminGetSettings() : Promise.resolve<SystemSettings | null>(null),
+        api.adminGetFilamentApiPrinters().catch(() => [] as FilamentApiPrinter[]),
       ]);
       setPrinters(p);
       setFilaments(f);
@@ -84,6 +87,7 @@ export function AdminDashboard() {
       setAccountRequests(ar);
       setTeachers(te);
       setSettings(se);
+      setFilamentApiPrinters(fap);
     } catch (err) {
       setError(translateApiError(err, t));
     } finally {
@@ -201,6 +205,8 @@ export function AdminDashboard() {
                   printers={printers}
                   filaments={filaments}
                   profiles={profiles}
+                  filamentApiEnabled={settings?.filament_api_enabled ?? filamentApiPrinters.length > 0}
+                  filamentApiPrinters={filamentApiPrinters}
                   onReload={reloadAll}
                   onError={setError}
                 />

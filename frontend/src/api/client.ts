@@ -10,6 +10,9 @@ import type {
   ClassEnrollment,
   ClassStudentRemoveResult,
   Filament,
+  FilamentApiHealth,
+  FilamentApiPrinter,
+  FilamentSyncResponse,
   JobDetail,
   MyJobsResponse,
   OrcaProfile,
@@ -183,6 +186,7 @@ export const api = {
       mmu_slots_count: number;
       machine_profile_id: number | null;
       process_profile_id: number | null;
+      filament_api_printer_id: string | null;
     }>
   ) =>
     request<AdminPrinter>(`/api/admin/printers/${printerId}`, {
@@ -302,6 +306,19 @@ export const api = {
     request<SystemSettings>('/api/admin/settings', {
       method: 'PATCH',
       body: JSON.stringify(data),
+    }),
+
+  // Admin: FilamentAPI
+  adminTestFilamentApi: (url?: string) =>
+    request<FilamentApiHealth>('/api/admin/filament-api/test', {
+      method: 'POST',
+      body: JSON.stringify(url ? { url } : {}),
+    }),
+  adminGetFilamentApiPrinters: () =>
+    request<FilamentApiPrinter[]>('/api/admin/filament-api/printers'),
+  adminSyncPrinterFilaments: () =>
+    request<FilamentSyncResponse>('/api/admin/printers/sync-filaments', {
+      method: 'POST',
     }),
 
   // Admin: Teachers (Super Admin)

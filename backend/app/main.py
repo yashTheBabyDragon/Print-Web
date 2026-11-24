@@ -15,21 +15,23 @@ from app.database import SessionLocal, init_db
 from app.routers import admin, auth, jobs, printers, samples
 from app.seed import seed_database
 from app.services.fdm_monster import poll_fdm_monster_once
+from app.services.filament_api import poll_filament_api_once
 
 logger = logging.getLogger(__name__)
 
 
 async def _fdm_poller_loop() -> None:
-    """Background task polling FDM Monster every 15s to sync statuses and trigger auto-refunds."""
+    """Background task polling FDM Monster and FilamentAPI every 15s to sync statuses and filaments."""
     while True:
         try:
             await asyncio.sleep(settings.poll_interval_seconds)
             with SessionLocal() as db:
                 await poll_fdm_monster_once(db)
+                await poll_filament_api_once(db)
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            logger.warning("FDM Monster poller tick error: %s", exc)
+            logger.warning("Background poller tick error: %s", exc)
 
 
 @asynccontextmanager

@@ -68,6 +68,26 @@ def _migrate_sqlite_schema(eng) -> None:
                 )
             conn.execute(text("CREATE INDEX IF NOT EXISTS ix_print_jobs_teacher_id ON print_jobs (teacher_id)"))
 
+        settings_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(system_settings)"))}
+        if settings_cols:
+            if "filament_api_enabled" not in settings_cols:
+                conn.execute(
+                    text("ALTER TABLE system_settings ADD COLUMN filament_api_enabled BOOLEAN NOT NULL DEFAULT 0")
+                )
+            if "filament_api_url" not in settings_cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE system_settings ADD COLUMN filament_api_url VARCHAR(255) NOT NULL DEFAULT 'http://filament-api:8000'"
+                    )
+                )
+
+        printer_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(printers)"))}
+        if printer_cols:
+            if "filament_api_printer_id" not in printer_cols:
+                conn.execute(
+                    text("ALTER TABLE printers ADD COLUMN filament_api_printer_id VARCHAR(120)")
+                )
+
 
 def init_db() -> None:
     """Create all tables if they do not exist and run lightweight SQLite migrations."""
