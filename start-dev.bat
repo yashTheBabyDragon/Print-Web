@@ -86,22 +86,50 @@ if not exist "%FRONTEND_DIR%\node_modules" (
 
 if not defined DEV_SEED set "DEV_SEED=true"
 
-echo [Backend] Starting FastAPI on http://127.0.0.1:8000 ...
-start "GGPrint Backend (FastAPI :8000)" cmd /k "cd /d ""%BACKEND_DIR%"" && set DEV_SEED=%DEV_SEED% && .venv\Scripts\uvicorn.exe app.main:app --reload --host 127.0.0.1 --port 8000"
+set "REQUESTED_BACKEND_PORT=8000"
+if defined BACKEND_PORT set "REQUESTED_BACKEND_PORT=%BACKEND_PORT%"
+set "REUSE_BACKEND=0"
 
-echo [Frontend] Starting Vite on http://localhost:5173 ...
-start "GGPrint Frontend (Vite :5173)" cmd /k "cd /d ""%FRONTEND_DIR%"" && npm run dev -- --port 5173"
+for /f "usebackq delims=" %%r in (`node -e "const http=require('http');const req=http.get('http://127.0.0.1:'+process.argv[1]+'/api/health',res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>console.log(d.includes('ggprint-backend')?'REUSE':'NO'));});req.on('error',()=>console.log('NO'));req.setTimeout(1500,()=>{req.destroy();console.log('NO');});" %REQUESTED_BACKEND_PORT%`) do (
+    if "%%r"=="REUSE" set "REUSE_BACKEND=1"
+)
+
+if "%REUSE_BACKEND%"=="1" (
+    set "BACKEND_PORT=%REQUESTED_BACKEND_PORT%"
+    echo [Backend] GGPrint FastAPI is already running on http://127.0.0.1:%REQUESTED_BACKEND_PORT% ^(reusing existing server^).
+    goto :backend_port_ready
+)
+for /f "usebackq delims=" %%p in (`node -e "const net=require('net');const list=[Number(process.argv[1]),8000,8001,8081,0];(function next(i){const p=list[i];const s=net.createServer();s.once('error',()=>next(i+1));s.once('listening',()=>{const a=s.address().port;s.close(()=>console.log(a));});s.listen(p,'127.0.0.1');})(0);" %REQUESTED_BACKEND_PORT%`) do set "BACKEND_PORT=%%p"
+if not "%BACKEND_PORT%"=="%REQUESTED_BACKEND_PORT%" (
+    echo [Backend] Port %REQUESTED_BACKEND_PORT% unavailable ^(in use or Windows-reserved^), using port %BACKEND_PORT% instead.
+)
+:backend_port_ready
+
+set "REQUESTED_FRONTEND_PORT=5173"
+if defined FRONTEND_PORT set "REQUESTED_FRONTEND_PORT=%FRONTEND_PORT%"
+for /f "usebackq delims=" %%p in (`node -e "const net=require('net');const list=[Number(process.argv[1]),5173,4173,5500,5273,8080,0];(function next(i){const p=list[i];const s=net.createServer();s.once('error',()=>next(i+1));s.once('listening',()=>{const a=s.address().port;s.close(()=>console.log(a));});s.listen(p,'127.0.0.1');})(0);" %REQUESTED_FRONTEND_PORT%`) do set "FRONTEND_PORT=%%p"
+if not "%FRONTEND_PORT%"=="%REQUESTED_FRONTEND_PORT%" (
+    echo [Frontend] Port %REQUESTED_FRONTEND_PORT% unavailable ^(in use or Windows-reserved^), using port %FRONTEND_PORT% instead.
+)
+
+if "%REUSE_BACKEND%"=="0" (
+    echo [Backend] Starting FastAPI on http://127.0.0.1:%BACKEND_PORT% ...
+    start "GGPrint Backend (FastAPI :%BACKEND_PORT%)" cmd /k "cd /d ""%BACKEND_DIR%"" && set ""DEV_SEED=%DEV_SEED%"" && .venv\Scripts\uvicorn.exe app.main:app --reload --host 127.0.0.1 --port %BACKEND_PORT%"
+)
+
+echo [Frontend] Starting Vite on http://127.0.0.1:%FRONTEND_PORT% ...
+start "GGPrint Frontend (Vite :%FRONTEND_PORT%)" cmd /k "cd /d ""%FRONTEND_DIR%"" && set ""VITE_API_TARGET=http://127.0.0.1:%BACKEND_PORT%"" && set ""FRONTEND_PORT=%FRONTEND_PORT%"" && npm run dev -- --host 127.0.0.1 --port %FRONTEND_PORT%"
 
 echo.
-echo   Frontend URL : http://localhost:5173
-echo   Backend API  : http://127.0.0.1:8000/docs
+echo   Frontend URL : http://127.0.0.1:%FRONTEND_PORT%
+echo   Backend API  : http://127.0.0.1:%BACKEND_PORT%/docs
 echo   Demo Admin   : DA 0000001 / admin123
 echo   Demo Student : DA 2345678 / student123
 echo   New DA Reg.  : 2333572 (unclaimed whitelist)
 echo.
 
 timeout /t 3 /nobreak >nul
-start "" "http://localhost:5173"
+start "" "http://127.0.0.1:%FRONTEND_PORT%"
 
 echo Servers launched in separate windows. Close those windows to stop them.
 endlocal
