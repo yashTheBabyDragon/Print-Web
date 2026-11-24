@@ -1,0 +1,75 @@
+"""FastAPI application entrypoint with lifespan DB init, seeding, and FDM Monster poller."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import settings
+from app.database import SessionLocal, init_db
+from app.routers import admin, auth, jobs, printers, samples
+from app.seed import seed_database
+from app.services.fdm_monster import poll_fdm_monster_once
+
+logger = logging.getLogger(__name__)
+
+
+async def _fdm_poller_loop() -> None:
+    """Background task polling FDM Monster every 15s to sync statuses and trigger auto-refunds."""
+    while True:
+        try:
+            await asyncio.sleep(settings.poll_interval_seconds)
+            with SessionLocal() as db:
+                await poll_fdm_monster_once(db)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("FDM Monster poller tick error: %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    with SessionLocal() as db:
+        seed_database(db)
+
+    poller_task = asyncio.create_task(_fdm_poller_loop())
+    try:
+        yield
+    finally:
+        poller_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poller_task
+
+
+app = FastAPI(
+    title="GGPrint API",
+    description="Cégep Gérald-Godin 3D Print & Slicing Portal API",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router)
+app.include_router(printers.router)
+app.include_router(samples.router)
+app.include_router(jobs.router)
+app.include_router(admin.router)
+
+
+@app.get("/api/health", tags=["health"])
+def health_check() -> dict[str, str]:
+    """Liveness probe for Docker/Nginx/local dev."""
+    return {"status": "ok", "service": "ggprint-backend"}

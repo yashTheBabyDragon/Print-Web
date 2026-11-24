@@ -1,0 +1,158 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+  --gg-accent-light: #007ba3;
+  --gg-accent-dark: #22b8e6;
+  --gg-accent: var(--gg-accent-light);
+  --gg-scroll-track: #f1f2f5;
+  --gg-scroll-thumb: #c3c7d1;
+  scrollbar-color: var(--gg-scroll-thumb) var(--gg-scroll-track);
+  accent-color: var(--gg-accent);
+}
+
+html.dark {
+  color-scheme: dark;
+  --gg-accent: var(--gg-accent-dark);
+  --gg-scroll-track: #15171c;
+  --gg-scroll-thumb: #323640;
+}
+
+html:not(.dark) {
+  color-scheme: light;
+}
+
+@supports (color: light-dark(white, black)) {
+  :root {
+    --gg-accent: light-dark(var(--gg-accent-light), var(--gg-accent-dark));
+    --gg-scroll-track: light-dark(#f1f2f5, #15171c);
+    --gg-scroll-thumb: light-dark(#c3c7d1, #323640);
+  }
+}
+
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: var(--gg-scroll-track);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--gg-scroll-thumb);
+    border-radius: 9999px;
+  }
+}
+
+@supports not (accent-color: auto) {
+  input[type='checkbox'] {
+    accent-color: auto;
+  }
+  input[type='range']::-webkit-slider-thumb {
+    background: var(--gg-accent);
+  }
+}
+
+@layer base {
+  html {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text',
+      'Plus Jakarta Sans', 'Segoe UI', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .no-spinner::-webkit-outer-spin-button,
+  .no-spinner::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .no-spinner {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+}
+
+@layer components {
+  /* Native <dialog> modal discipline & fluid entry */
+  dialog.gg-dialog {
+    margin: auto;
+    padding: 0;
+    border: 1px solid rgba(15, 23, 42, 0.1);
+    border-radius: 16px;
+    background: #ffffff;
+    color: #111318;
+    width: calc(100vw - 2rem);
+    box-shadow: 0 24px 48px -12px rgba(17, 19, 24, 0.22);
+  }
+
+  html.dark dialog.gg-dialog {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: #15171c;
+    color: #f4f5f7;
+    box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.65);
+  }
+
+  dialog.gg-dialog:modal {
+    overscroll-behavior: contain;
+  }
+
+  dialog.gg-dialog::backdrop {
+    background: rgba(17, 19, 24, 0.45);
+    overflow: hidden;
+    overscroll-behavior: contain;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    dialog.gg-dialog[open] {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      transition:
+        opacity 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+        transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+        display 0.18s allow-discrete,
+        overlay 0.18s allow-discrete;
+    }
+
+    @starting-style {
+      dialog.gg-dialog[open] {
+        opacity: 0;
+        transform: translateY(6px) scale(0.98);
+      }
+    }
+  }
+
+  .studio-surface {
+    @apply rounded-2xl border border-black/[0.08] bg-white dark:border-white/[0.09] dark:bg-[#15171C];
+  }
+
+  .studio-subtle {
+    @apply rounded-xl bg-[#EFEFF3] dark:bg-[#1D2027];
+  }
+
+  .studio-input {
+    @apply w-full rounded-xl border border-black/[0.11] bg-white px-3.5 py-2 text-sm text-[#111318] placeholder-[#8A909E] transition-colors focus:border-[#00A7D9] focus:outline-none focus:ring-2 focus:ring-[#00A7D9]/20 dark:border-white/[0.11] dark:bg-[#0D0E11] dark:text-[#F4F5F7] dark:placeholder-[#6B717D];
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-[#00A7D9] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#0090BD] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-black/[0.1] bg-white px-3.5 py-2 text-sm font-medium text-[#111318] transition-colors hover:bg-[#EFEFF3] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-45 dark:border-white/[0.1] dark:bg-[#1D2027] dark:text-[#F4F5F7] dark:hover:bg-[#262A33];
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-sm font-medium text-[#5B616E] transition-colors hover:bg-black/[0.05] hover:text-[#111318] disabled:cursor-not-allowed disabled:opacity-45 dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7];
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-rose-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-45;
+  }
+}
