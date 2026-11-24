@@ -48,6 +48,28 @@ class UserSummary(BaseModel):
     available_grams: float
     enforce_duration_limit: bool
     effective_max_print_minutes: int
+    notify_browser: bool = False
+    notify_webhook_url: Optional[str] = None
+
+
+class NotificationSettingsOut(BaseModel):
+    notify_browser: bool = False
+    notify_webhook_url: Optional[str] = None
+
+
+class NotificationSettingsPatch(BaseModel):
+    notify_browser: Optional[bool] = None
+    notify_webhook_url: Optional[str] = Field(default=None, max_length=500)
+
+
+class WebhookTestRequest(BaseModel):
+    webhook_url: Optional[str] = Field(default=None, max_length=500)
+
+
+class WebhookTestResponse(BaseModel):
+    ok: bool
+    status_code: Optional[int] = None
+    error: Optional[str] = None
 
 
 class RegisterRequest(BaseModel):

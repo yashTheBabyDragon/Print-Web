@@ -15,12 +15,21 @@ from app.schemas import (
     AuthTokenResponse,
     CheckDaOut,
     LoginRequest,
+    NotificationSettingsOut,
+    NotificationSettingsPatch,
     RegisterRequest,
     RegisterResponse,
     TeacherPublicOut,
     UserSummary,
+    WebhookTestRequest,
+    WebhookTestResponse,
 )
 from app.services.budget import build_user_summary, get_system_settings
+from app.services.notifications import (
+    build_test_webhook_payload,
+    normalize_webhook_url,
+    post_webhook,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -243,3 +252,67 @@ def get_me(
 ) -> UserSummary:
     """Return the authenticated user's profile and active budget metrics."""
     return build_user_summary(db, current_user)
+
+
+@router.get("/notifications", response_model=NotificationSettingsOut)
+def get_my_notifications(
+    current_user: User = Depends(get_current_user),
+) -> NotificationSettingsOut:
+    """Return the authenticated user's notification preferences (students, teachers, admins)."""
+    return NotificationSettingsOut(
+        notify_browser=bool(current_user.notify_browser),
+        notify_webhook_url=current_user.notify_webhook_url,
+    )
+
+
+@router.patch("/notifications", response_model=UserSummary)
+def update_my_notifications(
+    body: NotificationSettingsPatch,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserSummary:
+    """Update the authenticated user's browser notification flag and/or webhook URL."""
+    fields = body.model_fields_set
+    if "notify_browser" in fields and body.notify_browser is not None:
+        current_user.notify_browser = body.notify_browser
+    if "notify_webhook_url" in fields:
+        try:
+            current_user.notify_webhook_url = normalize_webhook_url(body.notify_webhook_url)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "INVALID_WEBHOOK_URL", "message": str(exc)},
+            ) from exc
+
+    db.commit()
+    db.refresh(current_user)
+    return build_user_summary(db, current_user)
+
+
+@router.post("/notifications/test-webhook", response_model=WebhookTestResponse)
+async def test_my_webhook(
+    body: WebhookTestRequest,
+    current_user: User = Depends(get_current_user),
+) -> WebhookTestResponse:
+    """Send a test notification to the provided webhook URL (or the user's saved webhook URL)."""
+    raw_url = body.webhook_url if body.webhook_url is not None else current_user.notify_webhook_url
+    try:
+        url = normalize_webhook_url(raw_url)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "INVALID_WEBHOOK_URL", "message": str(exc)},
+        ) from exc
+
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "WEBHOOK_URL_REQUIRED",
+                "message": "Enter a webhook URL before sending a test notification.",
+            },
+        )
+
+    payload = build_test_webhook_payload(current_user, url)
+    ok, status_code, error = await post_webhook(url, payload)
+    return WebhookTestResponse(ok=ok, status_code=status_code, error=error)

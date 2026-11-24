@@ -15,6 +15,7 @@ import type {
   FilamentSyncResponse,
   JobDetail,
   MyJobsResponse,
+  NotificationSettings,
   OrcaProfile,
   PendingAccountRequest,
   Printer,
@@ -28,6 +29,7 @@ import type {
   TestSliceResult,
   TransformPayload,
   UserSummary,
+  WebhookTestResult,
   WhitelistEntry,
 } from '../types/api';
 
@@ -130,6 +132,20 @@ export const api = {
       body: JSON.stringify({ da, name, password, teacher_id: teacherId ?? null }),
     }),
   getMe: () => request<UserSummary>('/api/auth/me'),
+  getNotifications: () => request<NotificationSettings>('/api/auth/notifications'),
+  updateNotifications: (data: {
+    notify_browser?: boolean;
+    notify_webhook_url?: string | null;
+  }) =>
+    request<UserSummary>('/api/auth/notifications', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  testWebhook: (webhookUrl?: string | null) =>
+    request<WebhookTestResult>('/api/auth/notifications/test-webhook', {
+      method: 'POST',
+      body: JSON.stringify(webhookUrl !== undefined ? { webhook_url: webhookUrl } : {}),
+    }),
 
   // Printers & Samples
   getPrinters: () => request<Printer[]>('/api/printers'),

@@ -36,6 +36,7 @@ from app.services.budget import (
 )
 from app.services.fdm_monster import FdmMonsterError, get_fdm_adapter
 from app.services.filament_api import sync_printer_filament
+from app.services.notifications import notify_job_completed
 from app.services.serializers import serialize_job
 from app.services.slicer import (
     OutOfBoundsError,
@@ -577,4 +578,6 @@ async def dev_complete_job(
     job.completed_at = utcnow()
     db.commit()
     db.refresh(job)
-    return serialize_job(db, _load_job_for_user(db, job.id, current_user), sys_settings)
+    loaded = _load_job_for_user(db, job.id, current_user)
+    await notify_job_completed(loaded)
+    return serialize_job(db, loaded, sys_settings)

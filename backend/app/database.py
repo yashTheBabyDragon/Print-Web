@@ -59,6 +59,14 @@ def _migrate_sqlite_schema(eng) -> None:
                 conn.execute(
                     text("ALTER TABLE users ADD COLUMN requested_teacher_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
                 )
+            if "notify_browser" not in user_cols:
+                conn.execute(
+                    text("ALTER TABLE users ADD COLUMN notify_browser BOOLEAN NOT NULL DEFAULT 0")
+                )
+            if "notify_webhook_url" not in user_cols:
+                conn.execute(
+                    text("ALTER TABLE users ADD COLUMN notify_webhook_url VARCHAR(500)")
+                )
 
         job_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(print_jobs)"))}
         if job_cols:

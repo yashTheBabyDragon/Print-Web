@@ -122,6 +122,8 @@ def build_user_summary(
         available_grams=available_grams,
         enforce_duration_limit=cfg.enforce_duration_limit,
         effective_max_print_minutes=max_minutes,
+        notify_browser=bool(getattr(user, "notify_browser", False)),
+        notify_webhook_url=getattr(user, "notify_webhook_url", None),
     )
 
 
