@@ -54,6 +54,19 @@ export interface UserSummary {
   available_grams: number;
   enforce_duration_limit: boolean;
   effective_max_print_minutes: number;
+  notify_browser?: boolean;
+  notify_webhook_url?: string | null;
+}
+
+export interface NotificationSettings {
+  notify_browser: boolean;
+  notify_webhook_url: string | null;
+}
+
+export interface WebhookTestResult {
+  ok: boolean;
+  status_code?: number | null;
+  error?: string | null;
 }
 
 export interface AuthResponse {

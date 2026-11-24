@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { emitJobsUpdated } from '../hooks/usePrintNotifications';
 import { formatMinutes, useI18n } from '../i18n';
 import type { JobDetail, JobStatus } from '../types/api';
 import { translateApiError } from '../utils/errors';
@@ -36,6 +37,7 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
       const res = await api.getMyJobs();
       setJobs(res.jobs);
       setUser(res.user);
+      emitJobsUpdated(res.jobs);
     } catch (err) {
       setError(translateApiError(err, t));
     } finally {

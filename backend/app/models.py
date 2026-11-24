@@ -112,6 +112,8 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     max_active_grams_override: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     max_print_minutes_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    notify_browser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    notify_webhook_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     jobs: Mapped[list[PrintJob]] = relationship(

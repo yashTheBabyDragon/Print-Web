@@ -1,8 +1,10 @@
-import { LogOut, Moon, Sun } from 'lucide-react';
+import { useState } from 'react';
+import { Bell, LogOut, Moon, Sun } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { useI18n } from '../i18n';
 import { Logo } from './Logo';
+import { NotificationSettingsModal } from './NotificationSettingsModal';
 
 export type ActiveTab = 'print' | 'my-prints' | 'admin';
 
@@ -15,8 +17,11 @@ export function Header({ activeTab, onSelectTab }: HeaderProps) {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const { lang, toggleLang, t } = useI18n();
+  const [notifModalOpen, setNotifModalOpen] = useState(false);
 
   if (!user) return null;
+
+  const hasNotificationsEnabled = Boolean(user.notify_browser || user.notify_webhook_url);
 
   const isStaff = user.role === 'admin' || user.role === 'teacher';
   const used = Number(user.active_grams_used ?? 0);
@@ -117,6 +122,23 @@ export function Header({ activeTab, onSelectTab }: HeaderProps) {
 
           <div className="hidden h-4 w-px bg-black/[0.08] dark:bg-white/[0.1] sm:block" />
 
+          {/* Notifications Settings (all users) */}
+          <button
+            type="button"
+            onClick={() => setNotifModalOpen(true)}
+            title={t.notifications.buttonTooltip}
+            aria-label={t.notifications.buttonTooltip}
+            className="btn-ghost relative p-1.5"
+          >
+            <Bell className="h-4 w-4" />
+            {hasNotificationsEnabled && (
+              <span
+                aria-hidden="true"
+                className="absolute right-1 top-1 h-2 w-2 rounded-full bg-[#00A7D9] ring-2 ring-white dark:ring-[#0D0E11]"
+              />
+            )}
+          </button>
+
           {/* FR / EN Toggle */}
           <button
             type="button"
@@ -164,6 +186,10 @@ export function Header({ activeTab, onSelectTab }: HeaderProps) {
           </div>
         </div>
       </div>
+      <NotificationSettingsModal
+        open={notifModalOpen}
+        onClose={() => setNotifModalOpen(false)}
+      />
     </header>
   );
 }

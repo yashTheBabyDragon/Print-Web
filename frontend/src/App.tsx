@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { I18nProvider, useI18n } from './i18n';
 import { Header, type ActiveTab } from './components/Header';
+import { usePrintNotifications } from './hooks/usePrintNotifications';
 import { AuthPage } from './pages/AuthPage';
 import { StudentWorkspace } from './pages/StudentWorkspace';
 import { MyPrintsPage } from './pages/MyPrintsPage';
@@ -13,6 +14,8 @@ function PortalShell() {
   const { user, loading } = useAuth();
   const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<ActiveTab>('print');
+
+  usePrintNotifications(() => setActiveTab('my-prints'));
 
   if (loading) {
     return (

@@ -10,17 +10,19 @@ from typing import Optional
 
 import httpx
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models import (
     JobStatus,
     PrintJob,
     Printer,
+    PrinterSlot,
     PrinterStatus,
     PrinterType,
     SystemSettings,
     utcnow,
 )
+from app.services.notifications import notify_job_completed
 
 logger = logging.getLogger(__name__)
 
@@ -412,11 +414,19 @@ async def poll_fdm_monster_once(db: Session) -> int:
 
     active_jobs = list(
         db.scalars(
-            select(PrintJob).where(
+            select(PrintJob)
+            .where(
                 PrintJob.status.in_([JobStatus.QUEUED.value, JobStatus.PRINTING.value])
+            )
+            .options(
+                selectinload(PrintJob.user),
+                selectinload(PrintJob.printer),
+                selectinload(PrintJob.slot).selectinload(PrinterSlot.filament),
+                selectinload(PrintJob.filament),
             )
         )
     )
+    newly_completed_jobs: list[PrintJob] = []
     for job in active_jobs:
         if not job.fdm_monster_job_id:
             continue
@@ -429,6 +439,8 @@ async def poll_fdm_monster_once(db: Session) -> int:
                 JobStatus.FAILED.value,
             ):
                 job.completed_at = utcnow()
+            if remote_status == JobStatus.COMPLETED.value:
+                newly_completed_jobs.append(job)
             updated_count += 1
 
     try:
@@ -442,8 +454,9 @@ async def poll_fdm_monster_once(db: Session) -> int:
     except FdmMonsterError as exc:
         logger.debug("Skipping printer status sync: %s", exc)
 
-    if updated_count > 0:
-        db.commit()
-    else:
-        db.commit()
+    db.commit()
+
+    for completed_job in newly_completed_jobs:
+        await notify_job_completed(completed_job)
+
     return updated_count
