@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth import hash_password
+from app.config import settings
 from app.database import get_db
 from app.models import (
     ClassEnrollment,
@@ -2860,6 +2861,14 @@ def admin_patch_settings(
     if "max_upload_mb" in fields and body.max_upload_mb is not None:
         sys_settings.max_upload_mb = body.max_upload_mb
     if "fdm_monster_mode" in fields and body.fdm_monster_mode is not None:
+        if body.fdm_monster_mode == "mock" and not settings.dev_seed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "MOCK_MODE_DISABLED",
+                    "message": "Mock FDM Monster mode is only available in development environments.",
+                },
+            )
         sys_settings.fdm_monster_mode = body.fdm_monster_mode
     if "fdm_monster_url" in fields and body.fdm_monster_url is not None:
         sys_settings.fdm_monster_url = body.fdm_monster_url.strip()
@@ -2868,6 +2877,14 @@ def admin_patch_settings(
         if not body.fdm_monster_api_key.startswith("*"):
             sys_settings.fdm_monster_api_key = body.fdm_monster_api_key.strip()
     if "slicer_mode" in fields and body.slicer_mode is not None:
+        if body.slicer_mode == "mock" and not settings.dev_seed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "MOCK_MODE_DISABLED",
+                    "message": "Mock slicer mode is only available in development environments.",
+                },
+            )
         sys_settings.slicer_mode = body.slicer_mode
     if "orca_cli_path" in fields and body.orca_cli_path is not None:
         try:

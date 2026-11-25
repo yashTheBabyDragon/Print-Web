@@ -397,7 +397,9 @@ class LiveFdmMonsterAdapter:
 
 
 def get_fdm_adapter(sys_settings: SystemSettings) -> MockFdmMonsterAdapter | LiveFdmMonsterAdapter:
-    if sys_settings.fdm_monster_mode == "live":
+    from app.config import settings
+
+    if not settings.dev_seed or sys_settings.fdm_monster_mode == "live":
         return LiveFdmMonsterAdapter(
             base_url=sys_settings.fdm_monster_url,
             api_key=sys_settings.fdm_monster_api_key,

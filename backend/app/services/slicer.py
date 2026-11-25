@@ -17,7 +17,7 @@ from typing import Any, Optional
 import numpy as np
 import trimesh
 
-from app.config import detect_orca_cli_path, detect_orca_resources_profiles_dirs
+from app.config import detect_orca_cli_path, detect_orca_resources_profiles_dirs, settings
 from app.models import OrcaProfile, Printer, PrinterSlot, SystemSettings
 
 logger = logging.getLogger(__name__)
@@ -1515,7 +1515,7 @@ def run_auto_orient(
     sys_settings: SystemSettings,
 ) -> BoundsResult:
     """Auto-orient an uploaded STL using the configured slicer mode."""
-    if sys_settings.slicer_mode == "orcaslicer":
+    if not settings.dev_seed or sys_settings.slicer_mode == "orcaslicer":
         adapter = OrcaSlicerCliAdapter(cli_path=sys_settings.orca_cli_path)
         return adapter.auto_orient_stl(original_stl_path, oriented_stl_path)
     return MockTrimeshSlicer().auto_orient_stl(original_stl_path, oriented_stl_path)
@@ -1542,7 +1542,7 @@ def run_slice(
         machine_p, process_p, filament_p, slot.slot_index, supports_enabled=supports_enabled
     )
 
-    if sys_settings.slicer_mode == "orcaslicer":
+    if not settings.dev_seed or sys_settings.slicer_mode == "orcaslicer":
         adapter = OrcaSlicerCliAdapter(cli_path=sys_settings.orca_cli_path)
         return adapter.slice_mesh(
             oriented_stl_path=oriented_stl_path,

@@ -48,7 +48,7 @@ interface AdminDashboardProps {
 }
 
 export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
-  const { user } = useAuth();
+  const { user, authMode } = useAuth();
   const { t } = useI18n();
 
   const canManagePrinters = hasPermission(user, PERMISSIONS.PRINTERS_MANAGE);
@@ -356,6 +356,7 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
                     settings={settings}
                     canManageSettings={canManageSettings}
                     canManageUpdates={canManageUpdates}
+                    isDevMode={Boolean(authMode?.dev_mode)}
                     onReload={reloadAll}
                     onError={setError}
                   />

@@ -138,19 +138,23 @@ def serialize_job(
 
 
 def serialize_settings(sys_settings: SystemSettings) -> SystemSettingsOut:
+    from app.config import settings
+
     raw_key = sys_settings.fdm_monster_api_key or ""
     masked = ("*" * max(4, len(raw_key) - 4) + raw_key[-4:]) if raw_key else ""
+    fdm_mode = sys_settings.fdm_monster_mode if settings.dev_seed else "live"
+    slicer_mode = sys_settings.slicer_mode if settings.dev_seed else "orcaslicer"
     return SystemSettingsOut(
         default_max_active_grams=sys_settings.default_max_active_grams,
         enforce_duration_limit=sys_settings.enforce_duration_limit,
         default_max_print_minutes=sys_settings.default_max_print_minutes,
         allow_multiple_jobs_within_budget=sys_settings.allow_multiple_jobs_within_budget,
         max_upload_mb=sys_settings.max_upload_mb,
-        fdm_monster_mode=sys_settings.fdm_monster_mode,  # type: ignore[arg-type]
+        fdm_monster_mode=fdm_mode,  # type: ignore[arg-type]
         fdm_monster_url=sys_settings.fdm_monster_url,
         fdm_monster_api_key=masked,
         has_fdm_monster_api_key=bool(raw_key),
-        slicer_mode=sys_settings.slicer_mode,  # type: ignore[arg-type]
+        slicer_mode=slicer_mode,  # type: ignore[arg-type]
         orca_cli_path=sys_settings.orca_cli_path,
         filament_api_enabled=sys_settings.filament_api_enabled,
         filament_api_url=sys_settings.filament_api_url,

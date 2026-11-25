@@ -116,7 +116,7 @@ export function MyPrintsPage({
   const used = user?.active_grams_used ?? 0;
   const max = user?.effective_max_active_grams ?? 100;
   const pct = max > 0 ? Math.min(100, (used / max) * 100) : 0;
-  const canDevComplete = Boolean(authMode?.dev_mode || authMode?.fdm_mode === 'mock');
+  const canDevComplete = Boolean(authMode?.dev_mode && authMode?.fdm_mode === 'mock');
   const draftCount = jobs.filter((job) => DRAFT_STATUSES.includes(job.status)).length;
 
   return (

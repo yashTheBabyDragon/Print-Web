@@ -579,7 +579,12 @@ def _ensure_profile_file(filename: str, payload: dict) -> Path:
 def seed_database(db: Session) -> None:
     """Ensure SystemSettings exists and seed dev demo data when DEV_SEED=true."""
     detected_cli = detect_orca_cli_path(settings.orca_cli_path_override)
-    default_mode = settings.slicer_mode_override or ("orcaslicer" if detected_cli else "mock")
+    if settings.dev_seed:
+        default_mode = settings.slicer_mode_override or ("orcaslicer" if detected_cli else "mock")
+        default_fdm_mode = "mock"
+    else:
+        default_mode = "orcaslicer"
+        default_fdm_mode = "live"
     default_cli = detected_cli or "orca-slicer"
 
     sys_settings = db.get(SystemSettings, 1)
@@ -587,22 +592,37 @@ def seed_database(db: Session) -> None:
         sys_settings = SystemSettings(
             id=1,
             slicer_mode=default_mode,
+            fdm_monster_mode=default_fdm_mode,
             orca_cli_path=default_cli,
         )
         db.add(sys_settings)
         db.commit()
-    elif settings.slicer_mode_override:
-        if sys_settings.slicer_mode != settings.slicer_mode_override:
-            sys_settings.slicer_mode = settings.slicer_mode_override
+    else:
+        dirty = False
+        if not settings.dev_seed:
+            if sys_settings.slicer_mode == "mock":
+                sys_settings.slicer_mode = "orcaslicer"
+                dirty = True
+            if sys_settings.fdm_monster_mode == "mock":
+                sys_settings.fdm_monster_mode = "live"
+                dirty = True
+            if detected_cli and sys_settings.orca_cli_path == "orca-slicer":
+                sys_settings.orca_cli_path = detected_cli
+                dirty = True
+        elif settings.slicer_mode_override:
+            if sys_settings.slicer_mode != settings.slicer_mode_override:
+                sys_settings.slicer_mode = settings.slicer_mode_override
+                dirty = True
+        elif (
+            detected_cli
+            and sys_settings.slicer_mode == "mock"
+            and sys_settings.orca_cli_path == "orca-slicer"
+        ):
+            sys_settings.slicer_mode = "orcaslicer"
+            sys_settings.orca_cli_path = detected_cli
+            dirty = True
+        if dirty:
             db.commit()
-    elif (
-        detected_cli
-        and sys_settings.slicer_mode == "mock"
-        and sys_settings.orca_cli_path == "orca-slicer"
-    ):
-        sys_settings.slicer_mode = "orcaslicer"
-        sys_settings.orca_cli_path = detected_cli
-        db.commit()
 
     if not settings.dev_seed:
         return

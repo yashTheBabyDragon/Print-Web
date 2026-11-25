@@ -28,6 +28,7 @@ interface AdminSettingsTabProps {
   settings: SystemSettings | null;
   canManageSettings?: boolean;
   canManageUpdates?: boolean;
+  isDevMode?: boolean;
   onReload: () => Promise<void>;
   onError: (msg: string) => void;
 }
@@ -36,6 +37,7 @@ export function AdminSettingsTab({
   settings,
   canManageSettings = true,
   canManageUpdates = true,
+  isDevMode = false,
   onReload,
   onError,
 }: AdminSettingsTabProps) {
@@ -116,9 +118,9 @@ export function AdminSettingsTab({
         default_max_print_minutes: Number(form.default_max_print_minutes),
         allow_multiple_jobs_within_budget: form.allow_multiple_jobs_within_budget,
         max_upload_mb: Number(form.max_upload_mb),
-        fdm_monster_mode: form.fdm_monster_mode,
+        fdm_monster_mode: isDevMode ? form.fdm_monster_mode : 'live',
         fdm_monster_url: form.fdm_monster_url,
-        slicer_mode: form.slicer_mode,
+        slicer_mode: isDevMode ? form.slicer_mode : 'orcaslicer',
         orca_cli_path: form.orca_cli_path,
         filament_api_enabled: form.filament_api_enabled,
         filament_api_url: form.filament_api_url,
@@ -282,13 +284,14 @@ export function AdminSettingsTab({
               {t.admin.settings.slicerMode}
             </label>
             <select
-              value={form.slicer_mode}
+              value={isDevMode ? form.slicer_mode : 'orcaslicer'}
               onChange={(e) =>
                 setForm({ ...form, slicer_mode: e.target.value as 'mock' | 'orcaslicer' })
               }
-              className="studio-input"
+              disabled={!isDevMode}
+              className="studio-input disabled:opacity-80"
             >
-              <option value="mock">{t.admin.settings.modeMock}</option>
+              {isDevMode && <option value="mock">{t.admin.settings.modeMock}</option>}
               <option value="orcaslicer">{t.admin.settings.modeOrca}</option>
             </select>
           </div>
@@ -314,16 +317,17 @@ export function AdminSettingsTab({
               {t.admin.settings.fdmMode}
             </label>
             <select
-              value={form.fdm_monster_mode}
+              value={isDevMode ? form.fdm_monster_mode : 'live'}
               onChange={(e) =>
                 setForm({
                   ...form,
                   fdm_monster_mode: e.target.value as 'mock' | 'live',
                 })
               }
-              className="studio-input"
+              disabled={!isDevMode}
+              className="studio-input disabled:opacity-80"
             >
-              <option value="mock">{t.admin.settings.modeMock}</option>
+              {isDevMode && <option value="mock">{t.admin.settings.modeMock}</option>}
               <option value="live">{t.admin.settings.modeLive}</option>
             </select>
           </div>

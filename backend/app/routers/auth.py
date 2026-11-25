@@ -39,10 +39,12 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 def get_auth_mode(db: Session = Depends(get_db)) -> AuthModeOut:
     """Public endpoint informing the login page of dev mode and integration modes."""
     sys_settings = get_system_settings(db)
+    slicer_mode = sys_settings.slicer_mode if settings.dev_seed else "orcaslicer"
+    fdm_mode = sys_settings.fdm_monster_mode if settings.dev_seed else "live"
     return AuthModeOut(
         dev_mode=settings.dev_seed,
-        slicer_mode=sys_settings.slicer_mode,
-        fdm_mode=sys_settings.fdm_monster_mode,
+        slicer_mode=slicer_mode,
+        fdm_mode=fdm_mode,
         institution=settings.institution,
     )
 

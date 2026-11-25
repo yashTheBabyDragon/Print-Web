@@ -237,4 +237,21 @@ describe('AdminSettingsTab', () => {
     });
     expect(await screen.findByText(/Update to 1\.3\.0 queued/i)).toBeInTheDocument();
   });
+
+  it('hides mock mode options when not in dev mode', () => {
+    render(
+      <I18nProvider>
+        <AdminSettingsTab
+          settings={BASE_SETTINGS}
+          isDevMode={false}
+          onReload={vi.fn().mockResolvedValue(undefined)}
+          onError={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    expect(screen.queryByRole('option', { name: /Mock/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /OrcaSlicer/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Live/i })).toBeInTheDocument();
+  });
 });

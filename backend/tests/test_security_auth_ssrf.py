@@ -179,3 +179,48 @@ def test_updater_rejects_non_github_release_url(
     r = client.get("/api/admin/system/update-status?force=true", headers=_auth(a_token))
     assert r.status_code == 200
     assert r.json()["release_url"] is None
+
+
+def test_mock_modes_disabled_and_blocked_when_not_dev(client, monkeypatch):
+    """When dev_seed=False, mock modes are rejected via API and never used by adapters."""
+    from app.config import settings
+    from app.database import SessionLocal
+    from app.models import SystemSettings
+    from app.services.fdm_monster import LiveFdmMonsterAdapter, get_fdm_adapter
+    from app.services.serializers import serialize_settings
+
+    admin_token = _login(client, "admin", "admin123")["access_token"]
+    monkeypatch.setattr(settings, "dev_seed", False)
+
+    mode_res = client.get("/api/auth/mode")
+    assert mode_res.status_code == 200
+    assert mode_res.json()["dev_mode"] is False
+    assert mode_res.json()["slicer_mode"] == "orcaslicer"
+    assert mode_res.json()["fdm_mode"] == "live"
+
+    bad_slicer = client.patch(
+        "/api/admin/settings",
+        headers=_auth(admin_token),
+        json={"slicer_mode": "mock"},
+    )
+    assert bad_slicer.status_code == 400
+    assert bad_slicer.json()["detail"]["code"] == "MOCK_MODE_DISABLED"
+
+    bad_fdm = client.patch(
+        "/api/admin/settings",
+        headers=_auth(admin_token),
+        json={"fdm_monster_mode": "mock"},
+    )
+    assert bad_fdm.status_code == 400
+    assert bad_fdm.json()["detail"]["code"] == "MOCK_MODE_DISABLED"
+
+    with SessionLocal() as db:
+        sys_cfg = db.get(SystemSettings, 1)
+        assert sys_cfg is not None
+        sys_cfg.slicer_mode = "mock"
+        sys_cfg.fdm_monster_mode = "mock"
+        db.commit()
+        assert isinstance(get_fdm_adapter(sys_cfg), LiveFdmMonsterAdapter)
+        serialized = serialize_settings(sys_cfg)
+        assert serialized.slicer_mode == "orcaslicer"
+        assert serialized.fdm_monster_mode == "live"
