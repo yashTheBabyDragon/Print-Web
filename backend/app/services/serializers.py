@@ -103,6 +103,7 @@ def serialize_job(
         original_filename=job.original_filename,
         oriented_mesh_url=f"/api/jobs/{job.id}/mesh",
         gcode_filename=job.gcode_filename,
+        gcode_url=f"/api/jobs/{job.id}/gcode" if job.sliced_output_path else None,
         pos_x_mm=job.pos_x_mm,
         pos_y_mm=job.pos_y_mm,
         quat_x=job.quat_x,

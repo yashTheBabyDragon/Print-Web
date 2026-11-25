@@ -14,10 +14,11 @@ import trimesh
 from fastapi.testclient import TestClient
 
 from app import database, main
-from app.config import settings
+from app.config import detect_orca_cli_path, settings
 from app.models import OrcaProfile, PrintJob, Printer, PrinterSlot
 from app.services import fdm_monster
-from app.services.slicer import OrcaSlicerCliAdapter
+from app.services.profiles import save_profile_file
+from app.services.slicer import OrcaSlicerCliAdapter, resolve_and_flatten_profile
 
 
 @pytest.fixture()
@@ -29,6 +30,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(settings, "data_dir", test_data_dir)
     monkeypatch.setattr(settings, "database_url", f"sqlite:///{test_db_path.as_posix()}")
     monkeypatch.setattr(settings, "dev_seed", True)
+    monkeypatch.setattr(settings, "slicer_mode_override", "mock")
 
     test_engine = database._build_engine(settings.effective_database_url)
     test_session_local = database.sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
@@ -1311,6 +1313,310 @@ def test_filament_api_settings_sync_and_slicer_auto_change(
     mk35_after = next(p for p in updated_printers if p["id"] == mk35["id"])
     assert mk35_after["slots"][0]["is_loaded"] is False
     assert mk35_after["slots"][0]["filament_id"] is None
+
+
+def test_gcode_endpoint_toolpaths_supports_and_access_control(client: TestClient):
+    student_auth = _login(client, "2345678", "student123")
+    s_token = student_auth["access_token"]
+    admin_auth = _login(client, "admin", "admin123")
+    a_token = admin_auth["access_token"]
+
+    # Register another student to test cross-user 403 on /gcode
+    r_other = client.post(
+        "/api/auth/register",
+        json={"da": "2333572", "name": "Other Student", "password": "password123"},
+    )
+    assert r_other.status_code == 201
+    other_token = r_other.json()["access_token"]
+
+    printers = client.get("/api/printers", headers=_auth_header(s_token)).json()
+    voron = next(p for p in printers if p["fdm_monster_id"] == "klipper-voron-1")
+    slot = voron["slots"][0]
+
+    # Use complex-mount.stl which has real overhangs
+    stl_bytes = client.get("/api/samples/complex-mount.stl").content
+    r_up = client.post(
+        "/api/jobs/upload",
+        headers=_auth_header(s_token),
+        files={"file": ("complex-mount.stl", stl_bytes, "model/stl")},
+        data={"printer_id": str(voron["id"]), "slot_id": str(slot["id"])},
+    )
+    assert r_up.status_code == 201
+    job = r_up.json()
+    assert job["gcode_url"] is None
+
+    # Before slicing, GET /gcode returns 404 GCODE_NOT_FOUND
+    r_pre = client.get(f"/api/jobs/{job['id']}/gcode", headers=_auth_header(s_token))
+    assert r_pre.status_code == 404
+    assert r_pre.json()["detail"]["code"] == "GCODE_NOT_FOUND"
+
+    # Slice with supports enabled
+    slice_payload = {
+        "printer_id": voron["id"],
+        "slot_id": slot["id"],
+        "pos_x_mm": 0.0,
+        "pos_y_mm": 0.0,
+        "quat_x": 0.0,
+        "quat_y": 0.0,
+        "quat_z": 0.0,
+        "quat_w": 1.0,
+        "scale": 1.0,
+        "supports_enabled": True,
+    }
+    r_slice_on = client.post(f"/api/jobs/{job['id']}/slice", headers=_auth_header(s_token), json=slice_payload)
+    assert r_slice_on.status_code == 200, r_slice_on.text
+    sliced_on = r_slice_on.json()
+    assert sliced_on["gcode_url"] == f"/api/jobs/{job['id']}/gcode"
+
+    r_gcode_on = client.get(sliced_on["gcode_url"], headers=_auth_header(s_token))
+    assert r_gcode_on.status_code == 200
+    assert "text/plain" in r_gcode_on.headers.get("content-type", "")
+    gcode_on = r_gcode_on.text
+    assert ";LAYER_CHANGE" in gcode_on
+    assert ";Z:" in gcode_on
+    assert ";TYPE:Skirt" in gcode_on
+    assert ";TYPE:Outer wall" in gcode_on
+    assert ";TYPE:Support" in gcode_on
+    assert "G1 " in gcode_on
+
+    # Re-slice with supports disabled -> omits ;TYPE:Support
+    r_slice_off = client.post(
+        f"/api/jobs/{job['id']}/slice",
+        headers=_auth_header(s_token),
+        json={**slice_payload, "supports_enabled": False},
+    )
+    assert r_slice_off.status_code == 200
+    r_gcode_off = client.get(f"/api/jobs/{job['id']}/gcode", headers=_auth_header(s_token))
+    assert r_gcode_off.status_code == 200
+    assert ";TYPE:Support" not in r_gcode_off.text
+    assert ";TYPE:Outer wall" in r_gcode_off.text
+
+    # Admin can read student's gcode, unrelated student gets 403
+    assert client.get(f"/api/jobs/{job['id']}/gcode", headers=_auth_header(a_token)).status_code == 200
+    assert client.get(f"/api/jobs/{job['id']}/gcode", headers=_auth_header(other_token)).status_code == 403
+
+
+def test_detect_orca_cli_path_and_profiles_inherits_flattener(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from app import config as app_config
+
+    fake_bin = tmp_path / "orca-slicer-headless"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.delenv("ORCA_CLI_PATH", raising=False)
+    monkeypatch.setattr(app_config.shutil, "which", lambda name: str(fake_bin) if name == "orca-slicer-headless" else None)
+    assert detect_orca_cli_path() == str(fake_bin)
+
+    # Multi-level vendor inheritance chain resolution
+    vendor_dir = tmp_path / "vendor_profiles"
+    (vendor_dir / "Vendor" / "process").mkdir(parents=True)
+    (vendor_dir / "Vendor" / "process" / "fdm_base.json").write_text(
+        json.dumps(
+            {
+                "type": "process",
+                "name": "fdm_base",
+                "from": "system",
+                "layer_height": "0.20",
+                "wall_loops": "2",
+                "sparse_infill_pattern": "grid",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (vendor_dir / "Vendor" / "process" / "standard.json").write_text(
+        json.dumps(
+            {
+                "type": "process",
+                "name": "0.20mm Standard @Vendor",
+                "inherits": "fdm_base",
+                "from": "system",
+                "wall_loops": "3",
+                "sparse_infill_density": "20%",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    partial_gui = {
+        "name": "Custom Lab Standard",
+        "from": "User",
+        "inherits": "0.20mm Standard @Vendor",
+        "sparse_infill_pattern": "gyroid",
+    }
+    flattened = resolve_and_flatten_profile(partial_gui, kind="process", extra_search_dirs=[vendor_dir])
+    assert "inherits" not in flattened
+    assert flattened["type"] == "process"
+    assert flattened["from"] == "User"
+    assert flattened["layer_height"] == "0.20"
+    assert flattened["wall_loops"] == "3"
+    assert flattened["sparse_infill_density"] == "20%"
+    assert flattened["sparse_infill_pattern"] == "gyroid"
+
+    # save_profile_file flattens GUI partial exports automatically
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
+    monkeypatch.setattr("app.services.slicer.detect_orca_resources_profiles_dirs", lambda _cli=None: [vendor_dir])
+    saved_path = save_profile_file("gui_export.json", json.dumps(partial_gui).encode("utf-8"), kind="process")
+    saved_dict = json.loads(saved_path.read_text(encoding="utf-8"))
+    assert "inherits" not in saved_dict
+    assert saved_dict["wall_loops"] == "3"
+    assert saved_dict["sparse_infill_pattern"] == "gyroid"
+
+
+def test_orcaslicer_cli_adapter_bed_centering_and_gcode_3mf_extraction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    adapter = OrcaSlicerCliAdapter(cli_path="/opt/orca/orca-slicer")
+    stl_path = tmp_path / "part.stl"
+    stl_path.write_bytes(_make_stl_bytes(extents=(20.0, 20.0, 15.0)))
+
+    machine_json = tmp_path / "machine.json"
+    machine_json.write_text(
+        json.dumps(
+            {
+                "type": "machine",
+                "from": "User",
+                "name": "Voron 300",
+                "printable_area": ["0x0", "300x0", "300x300", "0x300"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    process_json = tmp_path / "process.json"
+    process_json.write_text(json.dumps({"type": "process", "from": "User", "layer_height": "0.20"}), encoding="utf-8")
+    filament_json = tmp_path / "filament.json"
+    filament_json.write_text(json.dumps({"type": "filament", "from": "User", "filament_density": ["1.24"]}), encoding="utf-8")
+
+    machine_p = OrcaProfile(name="Voron", kind="machine", filename="machine.json", file_path=str(machine_json))
+    process_p = OrcaProfile(name="Standard", kind="process", filename="process.json", file_path=str(process_json))
+    filament_p = OrcaProfile(name="PLA", kind="filament", filename="filament.json", file_path=str(filament_json))
+
+    printer = Printer(
+        name="Voron",
+        display_name="Voron 2.4",
+        fdm_monster_id="klipper-voron-1",
+        printer_type="klipper",
+        bed_x_mm=300.0,
+        bed_y_mm=300.0,
+        bed_z_mm=300.0,
+        mmu_slots_count=4,
+    )
+    slot = PrinterSlot(slot_index=2, label="Slot 2", is_loaded=True)
+
+    captured_vertices: list[tuple[float, float]] = []
+
+    def fake_run(cmd, capture_output, text, timeout, check):
+        in_3mf = Path(cmd[-1])
+        with zipfile.ZipFile(in_3mf, "r") as zf:
+            model_xml = zf.read("3D/3dmodel.model").decode("utf-8")
+        import re as _re
+
+        xs = [float(x) for x in _re.findall(r'x="([^"]+)"', model_xml)]
+        ys = [float(y) for y in _re.findall(r'y="([^"]+)"', model_xml)]
+        captured_vertices.append((0.5 * (min(xs) + max(xs)), 0.5 * (min(ys) + max(ys))))
+
+        out_dir = Path(cmd[cmd.index("--outputdir") + 1])
+        gcode_3mf = out_dir / "plate_1.gcode.3mf"
+        with zipfile.ZipFile(gcode_3mf, "w", zipfile.ZIP_DEFLATED) as zout:
+            zout.writestr(
+                "Metadata/plate_1.gcode",
+                "; total filament used [g] = 7.25\n; estimated printing time (normal mode) = 24m 10s\n; total layer number: 75\nG1 X150 Y150 E1.0\n",
+            )
+        return None
+
+    monkeypatch.setattr("app.services.slicer.subprocess.run", fake_run)
+
+    res = adapter.slice_mesh(
+        oriented_stl_path=stl_path,
+        output_gcode_path=tmp_path / "extracted.gcode",
+        printer=printer,
+        slot=slot,
+        machine_profile=machine_p,
+        process_profile=process_p,
+        filament_profile=filament_p,
+        pos_x_mm=10.0,
+        pos_y_mm=-5.0,
+        supports_enabled=True,
+    )
+    assert captured_vertices[0][0] == pytest.approx(160.0, abs=0.05)
+    assert captured_vertices[0][1] == pytest.approx(145.0, abs=0.05)
+    assert res.estimated_grams == 7.25
+    assert res.estimated_minutes == 24
+    assert res.layer_count == 75
+    assert "G1 X150 Y150" in res.gcode_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(detect_orca_cli_path() is None, reason="OrcaSlicer CLI binary not installed")
+def test_real_orcaslicer_cli_orient_and_slice_complex_mount(tmp_path: Path):
+    from app.seed import _get_seeded_profile_specs
+
+    cli_path = detect_orca_cli_path()
+    assert cli_path is not None
+    adapter = OrcaSlicerCliAdapter(cli_path=cli_path)
+
+    # Verify auto_orient_stl on both tilted-bracket.stl and complex-mount.stl
+    tilted_src = settings.sample_models_dir / "tilted-bracket.stl"
+    tilted_out = tmp_path / "tilted_oriented.stl"
+    tilted_bounds = adapter.auto_orient_stl(tilted_src, tilted_out)
+    assert tilted_bounds.min_z == pytest.approx(0.0, abs=0.05)
+    assert abs(0.5 * (tilted_bounds.min_x + tilted_bounds.max_x)) < 0.2
+    assert abs(0.5 * (tilted_bounds.min_y + tilted_bounds.max_y)) < 0.2
+
+    complex_src = settings.sample_models_dir / "complex-mount.stl"
+    complex_out = tmp_path / "complex_oriented.stl"
+    complex_bounds = adapter.auto_orient_stl(complex_src, complex_out)
+    assert complex_bounds.min_z == pytest.approx(0.0, abs=0.05)
+
+    specs = {fname: (name, kind, payload) for name, kind, fname, _notes, payload in _get_seeded_profile_specs()}
+    profiles: dict[str, OrcaProfile] = {}
+    for fname, (name, kind, payload) in specs.items():
+        p = tmp_path / fname
+        p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        profiles[fname] = OrcaProfile(name=name, kind=kind, filename=fname, file_path=str(p))
+
+    printer = Printer(
+        name="Voron 2.4",
+        display_name="Voron 2.4 — Klipper #1",
+        fdm_monster_id="klipper-voron-1",
+        printer_type="klipper",
+        bed_x_mm=300.0,
+        bed_y_mm=300.0,
+        bed_z_mm=300.0,
+        mmu_slots_count=4,
+    )
+    slot = PrinterSlot(slot_index=1, label="Slot 1", is_loaded=True)
+
+    res_on = adapter.slice_mesh(
+        oriented_stl_path=complex_out,
+        output_gcode_path=tmp_path / "complex_on.gcode",
+        printer=printer,
+        slot=slot,
+        machine_profile=profiles["voron_24_300_klipper.json"],
+        process_profile=profiles["ggprint_020_standard.json"],
+        filament_profile=profiles["ggprint_generic_pla.json"],
+        supports_enabled=True,
+    )
+    gcode_on = res_on.gcode_path.read_text(encoding="utf-8", errors="ignore")
+    assert res_on.layer_count >= 100
+    assert res_on.estimated_grams > 0
+    assert res_on.estimated_minutes >= 1
+    assert ";WIDTH:" in gcode_on
+    assert ";HEIGHT:" in gcode_on
+    assert ";TYPE:Support" in gcode_on
+    assert "sparse_infill_pattern = gyroid" in gcode_on
+
+    res_off = adapter.slice_mesh(
+        oriented_stl_path=complex_out,
+        output_gcode_path=tmp_path / "complex_off.gcode",
+        printer=printer,
+        slot=slot,
+        machine_profile=profiles["voron_24_300_klipper.json"],
+        process_profile=profiles["ggprint_020_standard.json"],
+        filament_profile=profiles["ggprint_generic_pla.json"],
+        supports_enabled=False,
+    )
+    gcode_off = res_off.gcode_path.read_text(encoding="utf-8", errors="ignore")
+    assert res_off.layer_count >= 100
+    assert ";TYPE:Support" not in gcode_off
+    assert res_off.estimated_grams < res_on.estimated_grams
+
+
 
 
 

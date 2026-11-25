@@ -115,6 +115,19 @@ async function requestBuffer(path: string): Promise<ArrayBuffer> {
   return res.arrayBuffer();
 }
 
+async function requestText(path: string, options: RequestInit = {}): Promise<string> {
+  const token = getStoredToken();
+  const headers = new Headers(options.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  const res = await fetch(path, { cache: 'no-store', ...options, headers });
+  if (!res.ok) {
+    throw await parseErrorResponse(res);
+  }
+  return res.text();
+}
+
 export const api = {
   // Auth
   getAuthMode: () => request<AuthModeResponse>('/api/auth/mode'),
@@ -169,6 +182,7 @@ export const api = {
   reorientJob: (jobId: number) =>
     request<JobDetail>(`/api/jobs/${jobId}/reorient`, { method: 'POST' }),
   fetchJobMeshBuffer: (jobId: number) => requestBuffer(`/api/jobs/${jobId}/mesh`),
+  fetchJobGcodeText: (jobId: number) => requestText(`/api/jobs/${jobId}/gcode`),
   sliceJob: (jobId: number, payload: TransformPayload) =>
     request<JobDetail>(`/api/jobs/${jobId}/slice`, {
       method: 'POST',

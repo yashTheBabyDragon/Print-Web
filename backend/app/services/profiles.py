@@ -1,4 +1,4 @@
-"""OrcaSlicer profile storage and calibration test-slice service."""
+"""OrcaSlicer profile storage, inheritance flattening, and calibration test-slice service."""
 
 from __future__ import annotations
 
@@ -6,27 +6,41 @@ import json
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import trimesh
 
 from app.config import settings
 from app.models import OrcaProfile, Printer, PrinterSlot, SystemSettings
 from app.schemas import TestSliceResponse
-from app.services.slicer import build_command_preview, run_slice
+from app.services.slicer import (
+    build_command_preview,
+    resolve_and_flatten_profile,
+    run_slice,
+)
 
 
-def save_profile_file(filename: str, content: bytes) -> Path:
-    """Validate JSON profile content and persist it to data/profiles/."""
+def save_profile_file(filename: str, content: bytes, kind: Optional[str] = None) -> Path:
+    """Validate JSON profile content, resolve any 'inherits' chain, and persist to data/profiles/."""
     try:
-        json.loads(content.decode("utf-8-sig"))
+        parsed = json.loads(content.decode("utf-8-sig"))
     except Exception as exc:
         raise ValueError(f"Profile must be valid JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("Profile JSON must be a JSON object")
+
+    if isinstance(parsed.get("inherits"), str) and parsed["inherits"].strip():
+        parsed = resolve_and_flatten_profile(parsed, kind=kind)
+        out_bytes = json.dumps(parsed, indent=2).encode("utf-8")
+    else:
+        out_bytes = content
 
     settings.ensure_directories()
     safe_name = Path(filename).name or "profile.json"
     stored_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
     dest = settings.profiles_dir / stored_name
-    dest.write_bytes(content)
+    dest.write_bytes(out_bytes)
     return dest
 
 

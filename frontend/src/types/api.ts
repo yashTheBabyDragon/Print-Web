@@ -156,6 +156,7 @@ export interface JobDetail {
   filename?: string;
   status: JobStatus;
   oriented_mesh_url?: string;
+  gcode_url?: string | null;
   pos_x_mm: number;
   pos_y_mm: number;
   quat_x: number;
