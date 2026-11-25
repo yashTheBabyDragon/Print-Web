@@ -120,11 +120,70 @@ def _migrate_sqlite_schema(eng) -> None:
                 conn.execute(text("ALTER TABLE teacher_classes ADD COLUMN default_max_print_minutes INTEGER"))
 
 
+def _migrate_common_columns(eng) -> None:
+    """Idempotently add new columns on SQLite and PostgreSQL for existing installations."""
+    dialect = eng.dialect.name
+    with eng.begin() as conn:
+        if dialect == "sqlite":
+            job_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(print_jobs)"))}
+            if job_cols:
+                if "slice_error" not in job_cols:
+                    conn.execute(text("ALTER TABLE print_jobs ADD COLUMN slice_error TEXT"))
+                if "preview_stl_path" not in job_cols:
+                    conn.execute(text("ALTER TABLE print_jobs ADD COLUMN preview_stl_path VARCHAR(500)"))
+
+            settings_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(system_settings)"))}
+            if settings_cols:
+                if "setup_completed" not in settings_cols:
+                    conn.execute(
+                        text("ALTER TABLE system_settings ADD COLUMN setup_completed BOOLEAN NOT NULL DEFAULT 0")
+                    )
+                if "setup_token_hash" not in settings_cols:
+                    conn.execute(text("ALTER TABLE system_settings ADD COLUMN setup_token_hash VARCHAR(128)"))
+                if "setup_token_expires_at" not in settings_cols:
+                    conn.execute(text("ALTER TABLE system_settings ADD COLUMN setup_token_expires_at DATETIME"))
+                if "max_concurrent_slices" not in settings_cols:
+                    conn.execute(
+                        text("ALTER TABLE system_settings ADD COLUMN max_concurrent_slices INTEGER NOT NULL DEFAULT 2")
+                    )
+
+            printer_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(printers)"))}
+            if printer_cols and "is_manual" not in printer_cols:
+                conn.execute(text("ALTER TABLE printers ADD COLUMN is_manual BOOLEAN NOT NULL DEFAULT 0"))
+
+            user_cols_common = {row[1] for row in conn.execute(text("PRAGMA table_info(users)"))}
+            if user_cols_common and "hierarchy_rank" not in user_cols_common:
+                conn.execute(text("ALTER TABLE users ADD COLUMN hierarchy_rank INTEGER NOT NULL DEFAULT 50"))
+            if user_cols_common:
+                conn.execute(text("UPDATE users SET hierarchy_rank = 100 WHERE role = 'admin' AND hierarchy_rank != 100"))
+                conn.execute(text("UPDATE users SET hierarchy_rank = 0 WHERE role = 'student' AND hierarchy_rank = 50"))
+        elif dialect == "postgresql":
+            conn.execute(text("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS slice_error TEXT"))
+            conn.execute(text("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS preview_stl_path VARCHAR(500)"))
+            conn.execute(
+                text("ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS setup_completed BOOLEAN NOT NULL DEFAULT FALSE")
+            )
+            conn.execute(text("ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS setup_token_hash VARCHAR(128)"))
+            conn.execute(text("ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS setup_token_expires_at TIMESTAMPTZ"))
+            conn.execute(
+                text("ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS max_concurrent_slices INTEGER NOT NULL DEFAULT 2")
+            )
+            conn.execute(
+                text("ALTER TABLE printers ADD COLUMN IF NOT EXISTS is_manual BOOLEAN NOT NULL DEFAULT FALSE")
+            )
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN IF NOT EXISTS hierarchy_rank INTEGER NOT NULL DEFAULT 50")
+            )
+            conn.execute(text("UPDATE users SET hierarchy_rank = 100 WHERE role = 'admin' AND hierarchy_rank != 100"))
+            conn.execute(text("UPDATE users SET hierarchy_rank = 0 WHERE role = 'student' AND hierarchy_rank = 50"))
+
+
 def init_db() -> None:
-    """Create all tables if they do not exist and run lightweight SQLite migrations."""
+    """Create all tables if they do not exist and run lightweight schema migrations."""
     import app.models  # noqa: F401
 
     settings.ensure_directories()
     Base.metadata.create_all(bind=engine)
     if engine.dialect.name == "sqlite":
         _migrate_sqlite_schema(engine)
+    _migrate_common_columns(engine)

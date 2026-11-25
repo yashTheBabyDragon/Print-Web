@@ -4,10 +4,10 @@ import {
   Check,
   CheckCircle2,
   Edit3,
-  FileCode2,
   Loader2,
   Plus,
   Search,
+  Sparkles,
   Trash2,
   Upload,
   X,
@@ -18,16 +18,18 @@ import type {
   Filament,
   OrcaFilamentImportResult,
   OrcaProfile,
-  ProfileKind,
   PrusaSlicerImportResult,
   PrusaSlicerPreviewItem,
   PrusaSlicerPreviewResult,
 } from '../../types/api';
 import { translateApiError } from '../../utils/errors';
+import { OrcaFilamentCatalogModal } from './OrcaFilamentCatalogModal';
 
 interface AdminFilamentsProfilesTabProps {
   filaments: Filament[];
   profiles: OrcaProfile[];
+  canEditFilaments?: boolean;
+  canCreateDeleteFilaments?: boolean;
   onReload: () => Promise<void>;
   onError: (msg: string) => void;
 }
@@ -35,6 +37,8 @@ interface AdminFilamentsProfilesTabProps {
 export function AdminFilamentsProfilesTab({
   filaments,
   profiles,
+  canEditFilaments = true,
+  canCreateDeleteFilaments = true,
   onReload,
   onError,
 }: AdminFilamentsProfilesTabProps) {
@@ -58,12 +62,8 @@ export function AdminFilamentsProfilesTab({
     process_override_profile_id: string;
   } | null>(null);
 
-  const [pName, setPName] = useState('');
-  const [pKind, setPKind] = useState<ProfileKind>('machine');
-  const [pNotes, setPNotes] = useState('');
-  const [pFile, setPFile] = useState<File | null>(null);
-  const [uploadingProfile, setUploadingProfile] = useState(false);
-  const profileFileInputRef = useRef<HTMLInputElement | null>(null);
+  // OrcaSlicer built-in catalog modal state
+  const [catalogOpen, setCatalogOpen] = useState(false);
 
   // OrcaSlicer filament import state
   const [importPanelOpen, setImportPanelOpen] = useState(false);
@@ -230,32 +230,6 @@ export function AdminFilamentsProfilesTab({
     }
   };
 
-  const handleProfileFileSelect = async (file: File | null) => {
-    setPFile(file);
-    if (!file) return;
-    const fallbackName = file.name.replace(/\.json$/i, '');
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text.replace(/^\uFEFF/, '')) as Record<string, unknown>;
-      const detectedName = typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : fallbackName;
-      if (!pName.trim()) {
-        setPName(detectedName);
-      }
-      const rawType = typeof parsed.type === 'string' ? parsed.type.toLowerCase() : '';
-      if (rawType === 'machine' || rawType === 'printer') {
-        setPKind('machine');
-      } else if (rawType === 'process' || rawType === 'print') {
-        setPKind('process');
-      } else if (rawType === 'filament') {
-        setPKind('filament');
-      }
-    } catch {
-      if (!pName.trim()) {
-        setPName(fallbackName);
-      }
-    }
-  };
-
   const handleAddFilament = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!fName.trim()) return;
@@ -324,44 +298,23 @@ export function AdminFilamentsProfilesTab({
     }
   };
 
-  const handleUploadProfile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pFile || !pName.trim()) return;
-    setUploadingProfile(true);
-    try {
-      await api.adminUploadProfile(pFile, pName.trim(), pKind, pNotes.trim());
-      setPName('');
-      setPNotes('');
-      setPFile(null);
-      if (profileFileInputRef.current) {
-        profileFileInputRef.current.value = '';
-      }
-      await onReload();
-    } catch (err) {
-      onError(translateApiError(err, t));
-    } finally {
-      setUploadingProfile(false);
-    }
-  };
-
-  const handleDeleteProfile = async (id: number) => {
-    try {
-      await api.adminDeleteProfile(id);
-      await onReload();
-    } catch (err) {
-      onError(translateApiError(err, t));
-    }
-  };
-
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-      {/* Left: Filaments CRUD */}
-      <div className="studio-surface p-5 space-y-5 lg:col-span-7">
+    <div className="space-y-5">
+      <div className="studio-surface p-5 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
             {t.admin.filaments.filamentsTitle}
           </h2>
+          {canCreateDeleteFilaments && (
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setCatalogOpen(true)}
+              className="btn-primary py-1.5 text-xs"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              {t.admin.filaments.catalogBtn}
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -385,6 +338,7 @@ export function AdminFilamentsProfilesTab({
               {t.admin.filaments.importPrusaBtn}
             </button>
           </div>
+          )}
         </div>
 
         {/* OrcaSlicer Filament Importer Panel */}
@@ -579,7 +533,7 @@ export function AdminFilamentsProfilesTab({
             );
           });
           const prusaGroups: Array<{
-            kind: ProfileKind;
+            kind: 'filament' | 'process' | 'machine';
             label: string;
             items: PrusaSlicerPreviewItem[];
           }> = (
@@ -600,7 +554,7 @@ export function AdminFilamentsProfilesTab({
                 items: filteredItems.filter((i) => i.kind === 'machine'),
               },
             ] satisfies Array<{
-              kind: ProfileKind;
+              kind: 'filament' | 'process' | 'machine';
               label: string;
               items: PrusaSlicerPreviewItem[];
             }>
@@ -1003,6 +957,7 @@ export function AdminFilamentsProfilesTab({
           );
         })()}
 
+        {canCreateDeleteFilaments && (
         <form onSubmit={handleAddFilament} className="studio-subtle grid grid-cols-1 gap-2.5 p-3.5 sm:grid-cols-6">
           <div className="sm:col-span-3">
             <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
@@ -1093,6 +1048,7 @@ export function AdminFilamentsProfilesTab({
             </button>
           </div>
         </form>
+        )}
 
         <div className="divide-y divide-black/[0.06] dark:divide-white/[0.07]">
           {filaments.map((fil) => {
@@ -1212,22 +1168,26 @@ export function AdminFilamentsProfilesTab({
                   </div>
                 </div>
                 <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => startEdit(fil)}
-                    className="btn-ghost p-1.5"
-                    title={t.common.edit}
-                  >
-                    <Edit3 className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteFilament(fil.id)}
-                    className="btn-ghost p-1.5 hover:text-rose-600 dark:hover:text-rose-400"
-                    title={t.common.delete}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  {canEditFilaments && (
+                    <button
+                      type="button"
+                      onClick={() => startEdit(fil)}
+                      className="btn-ghost p-1.5"
+                      title={t.common.edit}
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                  {canCreateDeleteFilaments && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteFilament(fil.id)}
+                      className="btn-ghost p-1.5 hover:text-rose-600 dark:hover:text-rose-400"
+                      title={t.common.delete}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -1235,102 +1195,12 @@ export function AdminFilamentsProfilesTab({
         </div>
       </div>
 
-      {/* Right: OrcaSlicer JSON Profiles */}
-      <div className="studio-surface p-5 space-y-5 lg:col-span-5">
-        <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
-          {t.admin.filaments.profilesTitle}
-        </h2>
-
-        <form onSubmit={handleUploadProfile} className="studio-subtle space-y-3 p-3.5">
-          <div>
-            <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
-              {t.admin.filaments.profileName}
-            </label>
-            <input
-              type="text"
-              value={pName}
-              onChange={(e) => setPName(e.target.value)}
-              placeholder="Voron 2.4 0.20mm Standard"
-              className="studio-input py-1.5 text-xs"
-              required
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
-                {t.admin.filaments.profileKind}
-              </label>
-              <select
-                value={pKind}
-                onChange={(e) => setPKind(e.target.value as ProfileKind)}
-                className="studio-input py-1.5 text-xs"
-              >
-                <option value="machine">{t.admin.filaments.kindMachine}</option>
-                <option value="process">{t.admin.filaments.kindProcess}</option>
-                <option value="filament">{t.admin.filaments.kindFilament}</option>
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
-                {t.admin.filaments.profileNotes}
-              </label>
-              <input
-                type="text"
-                value={pNotes}
-                onChange={(e) => setPNotes(e.target.value)}
-                className="studio-input py-1.5 text-xs"
-              />
-            </div>
-          </div>
-          <div>
-            <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
-              {t.admin.filaments.selectJsonFile}
-            </label>
-            <input
-              ref={profileFileInputRef}
-              type="file"
-              accept=".json"
-              onChange={(e) => handleProfileFileSelect(e.target.files?.[0] ?? null)}
-              className="block w-full text-xs text-[#5B616E] file:mr-3 file:rounded-lg file:border-0 file:bg-[#00A7D9]/15 file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-[#007BA3] dark:text-[#9399A6] dark:file:text-[#38C6F4]"
-              required
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={uploadingProfile || !pFile}
-            className="btn-primary w-full py-1.5 text-xs"
-          >
-            <Upload className="h-3.5 w-3.5" />
-            {t.admin.filaments.uploadProfile}
-          </button>
-        </form>
-
-        <div className="divide-y divide-black/[0.06] dark:divide-white/[0.07]">
-          {profiles.map((prof) => (
-            <div key={prof.id} className="flex items-center justify-between gap-2 py-2.5">
-              <div className="flex min-w-0 items-center gap-2.5">
-                <FileCode2 className="h-4 w-4 shrink-0 text-[#5B616E] dark:text-[#9399A6]" />
-                <div className="min-w-0">
-                  <div className="truncate text-xs font-medium text-[#111318] dark:text-[#F4F5F7]">
-                    {prof.name}
-                  </div>
-                  <div className="text-[11px] text-[#5B616E] dark:text-[#9399A6]">
-                    {prof.kind}
-                    {prof.notes ? ` · ${prof.notes}` : ''}
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleDeleteProfile(prof.id)}
-                className="btn-ghost p-1.5 hover:text-rose-600 dark:hover:text-rose-400"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
+      <OrcaFilamentCatalogModal
+        open={catalogOpen}
+        onClose={() => setCatalogOpen(false)}
+        onCompleted={onReload}
+        onError={onError}
+      />
     </div>
   );
 }

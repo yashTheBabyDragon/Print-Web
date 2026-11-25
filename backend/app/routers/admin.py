@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.auth import hash_password
-from app.config import settings
+from app.auth import hash_password, require_super_admin
+from app.config import detect_orca_cli_path, settings
 from app.database import get_db
 from app.models import (
     ClassEnrollment,
@@ -35,19 +36,24 @@ from app.models import (
     utcnow,
 )
 from app.permissions import (
+    ADMIN_ONLY_PERMISSION_KEYS,
     PERMISSION_CATALOG,
-    PERMISSION_PRESETS,
+    PERMISSION_PRESET_DEFS,
+    ROLE_DEFAULT_RANK,
     Permission,
+    expand_implied_permissions,
+    get_effective_rank,
     get_permissions_for_role,
+    get_preset_spec,
     get_user_permissions,
     has_permission,
     require_any_permission,
     require_permission,
-    resolve_preset,
-    validate_permission_keys,
+    validate_delegatable_permissions,
 )
 from app.schemas import (
     AccountDecisionRequest,
+    AdminPrinterCreate,
     AdminPrinterOut,
     AdminPrinterPatch,
     AdminStudentOut,
@@ -65,6 +71,7 @@ from app.schemas import (
     ClassDeleteOut,
     ClassEnrollmentOut,
     ClassStudentRemoveOut,
+    FdmMonsterRemotePrinterOut,
     FilamentApiHealthOut,
     FilamentApiPrinterOut,
     FilamentApiTestRequest,
@@ -73,6 +80,12 @@ from app.schemas import (
     FilamentPatch,
     FilamentSyncResponse,
     JobDetail,
+    OrcaCatalogImportFilamentsRequest,
+    OrcaCatalogImportFilamentsResult,
+    OrcaCatalogImportPrinterRequest,
+    OrcaCatalogImportPrinterResult,
+    OrcaCatalogVendorDetail,
+    OrcaCatalogVendorSummary,
     OrcaFilamentImportItem,
     OrcaFilamentImportResult,
     OrcaFilamentSkippedItem,
@@ -88,6 +101,8 @@ from app.schemas import (
     PrusaSlicerPreviewResult,
     ResetPasswordRequest,
     ResetPasswordResponse,
+    SetupTestOrcaOut,
+    SetupTestOrcaRequest,
     StudentClassBadge,
     SystemSettingsOut,
     SystemSettingsPatch,
@@ -124,6 +139,11 @@ from app.services.profiles import (
     save_profile_file,
     test_slice_calibration_cube,
 )
+from app.services.orca_catalog import (
+    extract_filament_metadata,
+    extract_machine_metadata,
+    get_orca_catalog,
+)
 from app.services.prusaslicer import (
     extract_prusaslicer_ini_entries,
     parse_prusaslicer_ini,
@@ -133,7 +153,8 @@ from app.services.serializers import (
     serialize_job,
     serialize_settings,
 )
-from app.services.slicer import SlicerError, validate_orca_cli_path
+from app.services.slice_queue import slice_queue
+from app.services.slicer import SlicerError, probe_orcaslicer, validate_orca_cli_path
 from app.services.updater import check_latest_github_release, trigger_update
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -232,7 +253,24 @@ def _resolve_legacy_whitelist_class(db: Session, caller: User) -> TeacherClass:
     return first_cls or _get_or_create_default_individual_class(db, teacher_id)
 
 
-def _serialize_teacher(db: Session, teacher: User) -> AdminTeacherOut:
+def _can_caller_manage_account(caller: User, target: User) -> bool:
+    """Return True iff `caller` can manage `target` under the Discord-style hierarchy rules."""
+    if target.role == "admin":
+        return False
+    if caller.role == "admin":
+        return target.role in ("teacher", "tech")
+    if target.id == caller.id or target.role not in ("teacher", "tech"):
+        return False
+    if get_effective_rank(target) > get_effective_rank(caller):
+        return False
+    caller_perms = expand_implied_permissions(get_user_permissions(caller))
+    target_perms = expand_implied_permissions(get_user_permissions(target))
+    if target_perms - caller_perms:
+        return False
+    return True
+
+
+def _serialize_teacher(db: Session, teacher: User, caller: Optional[User] = None) -> AdminTeacherOut:
     class_count = int(
         db.scalar(select(func.count(TeacherClass.id)).where(TeacherClass.teacher_id == teacher.id)) or 0
     )
@@ -264,10 +302,18 @@ def _serialize_teacher(db: Session, teacher: User) -> AdminTeacherOut:
         )
         or 0
     )
+    can_manage = (
+        _can_caller_manage_account(caller, teacher)
+        if caller is not None
+        else teacher.role in ("teacher", "tech")
+    )
     return AdminTeacherOut(
         id=teacher.id,
         da=teacher.da,
         name=teacher.name,
+        role=teacher.role,  # type: ignore[arg-type]
+        hierarchy_rank=get_effective_rank(teacher),
+        can_manage=can_manage,
         is_active=teacher.is_active,
         permissions=get_user_permissions(teacher),
         has_custom_permissions=teacher.permissions_json is not None,
@@ -434,7 +480,7 @@ def _ensure_teacher_owns_student(db: Session, teacher_id: int, student_da: str) 
 
 @router.get("/printers", response_model=list[AdminPrinterOut])
 async def admin_list_printers(
-    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_VIEW)),
     db: Session = Depends(get_db),
 ) -> list[AdminPrinterOut]:
     sys_settings = get_system_settings(db)
@@ -461,7 +507,7 @@ async def admin_list_printers(
 
 @router.post("/printers/sync", response_model=list[AdminPrinterOut])
 async def admin_sync_printers(
-    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_CREATE_DELETE)),
     db: Session = Depends(get_db),
 ) -> list[AdminPrinterOut]:
     sys_settings = get_system_settings(db)
@@ -478,6 +524,9 @@ async def admin_sync_printers(
     existing_printers = list(db.scalars(select(Printer)))
     for old_printer in existing_printers:
         if old_printer.fdm_monster_id not in remote_ids:
+            # Never delete or disable standalone / manually created printers during FDM Monster sync
+            if old_printer.is_manual or str(old_printer.fdm_monster_id or "").startswith("manual-"):
+                continue
             active_jobs = int(
                 db.scalar(
                     select(func.count(PrintJob.id)).where(
@@ -552,7 +601,7 @@ async def admin_sync_printers(
 @router.delete("/printers/{printer_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_printer(
     printer_id: int,
-    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_CREATE_DELETE)),
     db: Session = Depends(get_db),
 ) -> None:
     printer = db.get(Printer, printer_id)
@@ -595,7 +644,7 @@ def admin_delete_printer(
 def admin_patch_printer(
     printer_id: int,
     body: AdminPrinterPatch,
-    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_EDIT)),
     db: Session = Depends(get_db),
 ) -> AdminPrinterOut:
     printer = db.scalar(
@@ -611,6 +660,27 @@ def admin_patch_printer(
         printer.is_enabled = body.is_enabled
     if "display_name" in fields and body.display_name is not None:
         printer.display_name = body.display_name.strip()
+    if "printer_type" in fields and body.printer_type is not None:
+        printer.printer_type = body.printer_type
+    if "fdm_monster_id" in fields:
+        raw_fdm = (body.fdm_monster_id or "").strip()
+        if not raw_fdm:
+            if not str(printer.fdm_monster_id or "").startswith("manual-"):
+                printer.fdm_monster_id = f"manual-{secrets.token_hex(4)}"
+            printer.is_manual = True
+        else:
+            conflict = db.scalar(
+                select(Printer.id).where(Printer.fdm_monster_id == raw_fdm, Printer.id != printer.id)
+            )
+            if conflict is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "FDM_ID_TAKEN",
+                        "message": f"FDM Monster ID '{raw_fdm}' is already linked to another printer",
+                    },
+                )
+            printer.fdm_monster_id = raw_fdm
     if "bed_x_mm" in fields and body.bed_x_mm is not None:
         printer.bed_x_mm = body.bed_x_mm
     if "bed_y_mm" in fields and body.bed_y_mm is not None:
@@ -655,12 +725,453 @@ def admin_patch_printer(
     return serialize_admin_printer(refreshed)  # type: ignore[arg-type]
 
 
+@router.get("/fdm-monster/printers", response_model=list[FdmMonsterRemotePrinterOut])
+async def admin_list_remote_fdm_printers(
+    _admin: User = Depends(require_any_permission(Permission.PRINTERS_CREATE_DELETE, Permission.PRINTERS_EDIT)),
+    db: Session = Depends(get_db),
+) -> list[FdmMonsterRemotePrinterOut]:
+    """List printers reported by FDM Monster so manual/catalog printers can be linked cleanly."""
+    sys_settings = get_system_settings(db)
+    adapter = get_fdm_adapter(sys_settings)
+    try:
+        remote_printers = await adapter.list_printers()
+    except FdmMonsterError:
+        return []
+    return [
+        FdmMonsterRemotePrinterOut(
+            fdm_monster_id=rp.fdm_monster_id,
+            name=rp.name,
+            printer_type=rp.printer_type,
+            status=rp.status,
+            queue_count=rp.queue_count,
+            bed_x_mm=rp.bed_x_mm,
+            bed_y_mm=rp.bed_y_mm,
+            bed_z_mm=rp.bed_z_mm,
+            mmu_slots_count=rp.mmu_slots_count,
+        )
+        for rp in remote_printers
+    ]
+
+
+def _create_printer_with_slots(
+    db: Session,
+    *,
+    display_name: str,
+    printer_type: str,
+    bed_x_mm: float,
+    bed_y_mm: float,
+    bed_z_mm: float,
+    mmu_slots_count: int,
+    fdm_monster_id: Optional[str],
+    filament_api_printer_id: Optional[str],
+    machine_profile_id: Optional[int],
+    process_profile_id: Optional[int],
+    slot_filament_ids: list[Optional[int]],
+    is_enabled: bool,
+) -> Printer:
+    raw_fdm = (fdm_monster_id or "").strip()
+    if raw_fdm:
+        if db.scalar(select(Printer.id).where(Printer.fdm_monster_id == raw_fdm)) is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "FDM_ID_TAKEN",
+                    "message": f"FDM Monster ID '{raw_fdm}' is already linked to another printer",
+                },
+            )
+        resolved_fdm = raw_fdm
+    else:
+        resolved_fdm = f"manual-{secrets.token_hex(4)}"
+
+    cleaned_name = display_name.strip()
+    printer = Printer(
+        name=cleaned_name,
+        display_name=cleaned_name,
+        fdm_monster_id=resolved_fdm,
+        filament_api_printer_id=(filament_api_printer_id or "").strip() or None,
+        printer_type=printer_type,
+        status="idle",
+        queue_count=0,
+        is_enabled=is_enabled,
+        is_manual=True,
+        bed_x_mm=bed_x_mm,
+        bed_y_mm=bed_y_mm,
+        bed_z_mm=bed_z_mm,
+        mmu_slots_count=mmu_slots_count,
+        machine_profile_id=machine_profile_id,
+        process_profile_id=process_profile_id,
+    )
+    db.add(printer)
+    db.flush()
+
+    valid_fil_ids: set[int] = set()
+    requested_ids = [fid for fid in slot_filament_ids if fid is not None]
+    if requested_ids:
+        valid_fil_ids = set(db.scalars(select(Filament.id).where(Filament.id.in_(requested_ids))))
+
+    for idx in range(1, mmu_slots_count + 1):
+        assigned_fid = slot_filament_ids[idx - 1] if idx - 1 < len(slot_filament_ids) else None
+        if assigned_fid is not None and assigned_fid not in valid_fil_ids:
+            assigned_fid = None
+        db.add(
+            PrinterSlot(
+                printer_id=printer.id,
+                slot_index=idx,
+                label=f"Slot {idx}" if mmu_slots_count > 1 else "Extrudeur",
+                filament_id=assigned_fid,
+                is_loaded=assigned_fid is not None,
+            )
+        )
+    return printer
+
+
+@router.post("/printers", response_model=AdminPrinterOut, status_code=status.HTTP_201_CREATED)
+def admin_create_printer(
+    body: AdminPrinterCreate,
+    _admin: User = Depends(require_permission(Permission.PRINTERS_CREATE_DELETE)),
+    db: Session = Depends(get_db),
+) -> AdminPrinterOut:
+    """Manually add a standalone or FDM-Monster-linked printer with OrcaSlicer profiles."""
+    printer = _create_printer_with_slots(
+        db,
+        display_name=body.display_name,
+        printer_type=body.printer_type,
+        bed_x_mm=body.bed_x_mm,
+        bed_y_mm=body.bed_y_mm,
+        bed_z_mm=body.bed_z_mm,
+        mmu_slots_count=body.mmu_slots_count,
+        fdm_monster_id=body.fdm_monster_id,
+        filament_api_printer_id=body.filament_api_printer_id,
+        machine_profile_id=body.machine_profile_id,
+        process_profile_id=body.process_profile_id,
+        slot_filament_ids=body.slot_filament_ids,
+        is_enabled=body.is_enabled,
+    )
+    db.commit()
+    refreshed = db.scalar(
+        select(Printer)
+        .where(Printer.id == printer.id)
+        .options(selectinload(Printer.slots).selectinload(PrinterSlot.filament))
+    )
+    return serialize_admin_printer(refreshed)  # type: ignore[arg-type]
+
+
+def _upsert_catalog_profile(
+    db: Session,
+    *,
+    name: str,
+    kind: str,
+    flat_data: dict,
+    notes: str,
+) -> OrcaProfile:
+    safe_base = "".join(c if c.isalnum() or c in "._-" else "_" for c in name).strip("._-") or kind
+    filename = f"{safe_base[:80]}.json"
+    raw_bytes = json.dumps(flat_data, indent=2).encode("utf-8")
+    stored_path = save_profile_file(filename, raw_bytes, kind=kind)
+
+    existing = db.scalar(
+        select(OrcaProfile).where(
+            OrcaProfile.kind == kind,
+            func.lower(OrcaProfile.name) == name.lower(),
+        )
+    )
+    if existing is not None:
+        delete_profile_file(existing)
+        existing.name = name
+        existing.filename = filename
+        existing.file_path = str(stored_path)
+        existing.notes = notes
+        db.flush()
+        db.refresh(existing)
+        return existing
+
+    profile = OrcaProfile(
+        name=name,
+        kind=kind,
+        filename=filename,
+        file_path=str(stored_path),
+        notes=notes,
+    )
+    db.add(profile)
+    db.flush()
+    db.refresh(profile)
+    return profile
+
+
+def _import_catalog_filament(
+    db: Session,
+    *,
+    catalog,
+    vendor_id: str,
+    preset_name: str,
+    update_existing: bool = True,
+) -> tuple[Filament, OrcaProfile, bool]:
+    flat = catalog.flatten_preset("filament", preset_name, vendor_id=vendor_id)
+    meta = extract_filament_metadata(flat, fallback_name=preset_name)
+    prof = _upsert_catalog_profile(
+        db,
+        name=meta["name"],
+        kind=ProfileKind.FILAMENT.value,
+        flat_data=flat,
+        notes=meta["notes"],
+    )
+    existing_fil = db.scalar(select(Filament).where(func.lower(Filament.name) == meta["name"].lower()))
+    if existing_fil is not None:
+        if update_existing:
+            existing_fil.material = meta["material"]
+            existing_fil.color_hex = meta["color_hex"]
+            existing_fil.density_g_cm3 = meta["density_g_cm3"]
+            existing_fil.filament_profile_id = prof.id
+            existing_fil.is_active = True
+            db.flush()
+            db.refresh(existing_fil)
+        return existing_fil, prof, False
+
+    fil = Filament(
+        name=meta["name"],
+        material=meta["material"],
+        color_hex=meta["color_hex"],
+        density_g_cm3=meta["density_g_cm3"],
+        filament_profile_id=prof.id,
+        is_active=True,
+    )
+    db.add(fil)
+    db.flush()
+    db.refresh(fil)
+    return fil, prof, True
+
+
+@router.get("/orca-catalog/vendors", response_model=list[OrcaCatalogVendorSummary])
+def admin_list_orca_catalog_vendors(
+    _admin: User = Depends(
+        require_any_permission(
+            Permission.PRINTERS_CREATE_DELETE,
+            Permission.PRINTERS_EDIT,
+            Permission.PROFILES_MANAGE,
+            Permission.FILAMENTS_CREATE_DELETE,
+        )
+    ),
+    db: Session = Depends(get_db),
+) -> list[OrcaCatalogVendorSummary]:
+    sys_settings = get_system_settings(db)
+    catalog = get_orca_catalog(sys_settings.orca_cli_path)
+    return [OrcaCatalogVendorSummary(**item) for item in catalog.list_vendors()]
+
+
+@router.get("/orca-catalog/vendors/{vendor}", response_model=OrcaCatalogVendorDetail)
+def admin_get_orca_catalog_vendor(
+    vendor: str,
+    _admin: User = Depends(
+        require_any_permission(
+            Permission.PRINTERS_CREATE_DELETE,
+            Permission.PRINTERS_EDIT,
+            Permission.PROFILES_MANAGE,
+            Permission.FILAMENTS_CREATE_DELETE,
+        )
+    ),
+    db: Session = Depends(get_db),
+) -> OrcaCatalogVendorDetail:
+    sys_settings = get_system_settings(db)
+    catalog = get_orca_catalog(sys_settings.orca_cli_path)
+    try:
+        detail = catalog.get_vendor_detail(vendor)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "VENDOR_NOT_FOUND", "message": str(exc)},
+        ) from exc
+    return OrcaCatalogVendorDetail(**detail)
+
+
+@router.get("/orca-catalog/cover/{vendor}/{filename}")
+def admin_get_orca_catalog_cover(
+    vendor: str,
+    filename: str,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """Serve verified built-in OrcaSlicer printer cover thumbnail images."""
+    sys_settings = get_system_settings(db)
+    catalog = get_orca_catalog(sys_settings.orca_cli_path)
+    path = catalog.resolve_cover_path(vendor, filename)
+    if path is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cover image not found")
+    media_type = "image/svg+xml" if path.suffix.lower() == ".svg" else "image/png"
+    return FileResponse(
+        path=path,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.post("/orca-catalog/import-printer", response_model=OrcaCatalogImportPrinterResult)
+def admin_import_orca_catalog_printer(
+    body: OrcaCatalogImportPrinterRequest,
+    caller: User = Depends(require_any_permission(Permission.PRINTERS_CREATE_DELETE, Permission.PRINTERS_EDIT)),
+    db: Session = Depends(get_db),
+) -> OrcaCatalogImportPrinterResult:
+    """Flatten & import a built-in OrcaSlicer printer + process + filaments and create or attach printer."""
+    if body.target_printer_id is None and not has_permission(caller, Permission.PRINTERS_CREATE_DELETE):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Permission 'printers:create_delete' is required to create new printers.",
+                "required_permission": Permission.PRINTERS_CREATE_DELETE.value,
+            },
+        )
+    sys_settings = get_system_settings(db)
+    catalog = get_orca_catalog(sys_settings.orca_cli_path)
+
+    try:
+        flat_machine = catalog.flatten_preset(
+            "machine", body.machine_preset_name, vendor_id=body.vendor
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "PRESET_NOT_FOUND", "message": str(exc)},
+        ) from exc
+
+    mmeta = extract_machine_metadata(flat_machine)
+    machine_profile = _upsert_catalog_profile(
+        db,
+        name=body.machine_preset_name,
+        kind=ProfileKind.MACHINE.value,
+        flat_data=flat_machine,
+        notes=f"OrcaSlicer catalog ({body.vendor}) · {mmeta['bed_x_mm']}×{mmeta['bed_y_mm']}×{mmeta['bed_z_mm']} mm",
+    )
+
+    process_profile: Optional[OrcaProfile] = None
+    if body.process_preset_name:
+        try:
+            flat_process = catalog.flatten_preset(
+                "process", body.process_preset_name, vendor_id=body.vendor
+            )
+            process_profile = _upsert_catalog_profile(
+                db,
+                name=body.process_preset_name,
+                kind=ProfileKind.PROCESS.value,
+                flat_data=flat_process,
+                notes=f"OrcaSlicer catalog ({body.vendor})",
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "PRESET_NOT_FOUND", "message": str(exc)},
+            ) from exc
+
+    imported_filaments: list[Filament] = []
+    for fname in body.filament_preset_names:
+        try:
+            fil, _fprof, _created = _import_catalog_filament(
+                db, catalog=catalog, vendor_id=body.vendor, preset_name=fname
+            )
+            imported_filaments.append(fil)
+        except KeyError:
+            continue
+
+    target_mmu = body.mmu_slots_override or max(
+        mmeta["mmu_slots_count"],
+        min(16, len(imported_filaments)) if len(imported_filaments) > 1 else mmeta["mmu_slots_count"],
+    )
+
+    if body.target_printer_id is not None:
+        printer = db.scalar(
+            select(Printer)
+            .where(Printer.id == body.target_printer_id)
+            .options(selectinload(Printer.slots).selectinload(PrinterSlot.filament))
+        )
+        if printer is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Printer not found")
+        printer.machine_profile_id = machine_profile.id
+        if process_profile is not None:
+            printer.process_profile_id = process_profile.id
+        printer.bed_x_mm = mmeta["bed_x_mm"]
+        printer.bed_y_mm = mmeta["bed_y_mm"]
+        printer.bed_z_mm = mmeta["bed_z_mm"]
+        if body.display_name and body.display_name.strip():
+            printer.display_name = body.display_name.strip()
+        if imported_filaments:
+            sorted_slots = sorted(printer.slots, key=lambda s: s.slot_index)
+            for idx, slot in enumerate(sorted_slots):
+                if idx < len(imported_filaments):
+                    slot.filament_id = imported_filaments[idx].id
+                    slot.is_loaded = True
+    else:
+        printer = _create_printer_with_slots(
+            db,
+            display_name=(body.display_name or body.machine_preset_name).strip(),
+            printer_type=mmeta["printer_type"],
+            bed_x_mm=mmeta["bed_x_mm"],
+            bed_y_mm=mmeta["bed_y_mm"],
+            bed_z_mm=mmeta["bed_z_mm"],
+            mmu_slots_count=target_mmu,
+            fdm_monster_id=body.fdm_monster_id,
+            filament_api_printer_id=body.filament_api_printer_id,
+            machine_profile_id=machine_profile.id,
+            process_profile_id=process_profile.id if process_profile else None,
+            slot_filament_ids=[f.id for f in imported_filaments],
+            is_enabled=True,
+        )
+
+    db.commit()
+    refreshed = db.scalar(
+        select(Printer)
+        .where(Printer.id == printer.id)
+        .options(selectinload(Printer.slots).selectinload(PrinterSlot.filament))
+    )
+    return OrcaCatalogImportPrinterResult(
+        printer=serialize_admin_printer(refreshed),  # type: ignore[arg-type]
+        machine_profile=OrcaProfileOut.model_validate(machine_profile),
+        process_profile=OrcaProfileOut.model_validate(process_profile) if process_profile else None,
+        filaments=[FilamentOut.model_validate(f) for f in imported_filaments],
+    )
+
+
+@router.post("/orca-catalog/import-filaments", response_model=OrcaCatalogImportFilamentsResult)
+def admin_import_orca_catalog_filaments(
+    body: OrcaCatalogImportFilamentsRequest,
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_CREATE_DELETE)),
+    db: Session = Depends(get_db),
+) -> OrcaCatalogImportFilamentsResult:
+    """Import one or more filaments from OrcaSlicer's built-in catalog into GGPrint."""
+    sys_settings = get_system_settings(db)
+    catalog = get_orca_catalog(sys_settings.orca_cli_path)
+
+    out: list[FilamentOut] = []
+    created = 0
+    updated = 0
+    for pname in body.preset_names:
+        try:
+            fil, _prof, was_created = _import_catalog_filament(
+                db,
+                catalog=catalog,
+                vendor_id=body.vendor,
+                preset_name=pname,
+                update_existing=body.update_existing,
+            )
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+            out.append(FilamentOut.model_validate(fil))
+        except KeyError:
+            continue
+
+    db.commit()
+    return OrcaCatalogImportFilamentsResult(
+        filaments=out,
+        created_count=created,
+        updated_count=updated,
+    )
+
+
 @router.put("/printers/{printer_id}/slots/{slot_index}", response_model=AdminPrinterOut)
 def admin_update_printer_slot(
     printer_id: int,
     slot_index: int,
     body: PrinterSlotUpdate,
-    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE_SLOTS)),
     db: Session = Depends(get_db),
 ) -> AdminPrinterOut:
     printer = db.get(Printer, printer_id)
@@ -706,7 +1217,7 @@ def admin_update_printer_slot(
 
 @router.get("/filaments", response_model=list[FilamentOut])
 def admin_list_filaments(
-    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
+    _admin: User = Depends(require_any_permission(Permission.FILAMENTS_VIEW, Permission.PRINTERS_VIEW)),
     db: Session = Depends(get_db),
 ) -> list[FilamentOut]:
     filaments = list(db.scalars(select(Filament).order_by(Filament.id.asc())))
@@ -716,7 +1227,7 @@ def admin_list_filaments(
 @router.post("/filaments", response_model=FilamentOut, status_code=status.HTTP_201_CREATED)
 def admin_create_filament(
     body: FilamentCreate,
-    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_CREATE_DELETE)),
     db: Session = Depends(get_db),
 ) -> FilamentOut:
     filament = Filament(
@@ -739,7 +1250,7 @@ async def admin_import_orca_filaments(
     files: list[UploadFile] = File(default=[]),
     update_existing: bool = Form(default=True),
     default_color_hex: Optional[str] = Form(default=None),
-    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_CREATE_DELETE)),
     db: Session = Depends(get_db),
 ) -> OrcaFilamentImportResult:
     """Import one or more OrcaSlicer filament profiles (.json, .orca_filament, or .zip)."""
@@ -886,7 +1397,7 @@ async def admin_import_orca_filaments(
 def admin_patch_filament(
     filament_id: int,
     body: FilamentPatch,
-    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_EDIT)),
     db: Session = Depends(get_db),
 ) -> FilamentOut:
     filament = db.get(Filament, filament_id)
@@ -917,7 +1428,7 @@ def admin_patch_filament(
 @router.delete("/filaments/{filament_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_filament(
     filament_id: int,
-    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_CREATE_DELETE)),
     db: Session = Depends(get_db),
 ) -> None:
     filament = db.get(Filament, filament_id)
@@ -929,7 +1440,13 @@ def admin_delete_filament(
 
 @router.get("/profiles", response_model=list[OrcaProfileOut])
 def admin_list_profiles(
-    _admin: User = Depends(require_permission(Permission.PROFILES_MANAGE)),
+    _admin: User = Depends(
+        require_any_permission(
+            Permission.PROFILES_VIEW,
+            Permission.PRINTERS_EDIT,
+            Permission.FILAMENTS_EDIT,
+        )
+    ),
     db: Session = Depends(get_db),
 ) -> list[OrcaProfileOut]:
     profiles = list(db.scalars(select(OrcaProfile).order_by(OrcaProfile.kind.asc(), OrcaProfile.id.asc())))
@@ -998,7 +1515,9 @@ def admin_delete_profile(
 @router.post("/profiles/preview-prusaslicer", response_model=PrusaSlicerPreviewResult)
 async def admin_preview_prusaslicer(
     files: list[UploadFile] = File(default=[]),
-    caller: User = Depends(require_any_permission(Permission.FILAMENTS_MANAGE, Permission.PROFILES_MANAGE)),
+    caller: User = Depends(
+        require_any_permission(Permission.FILAMENTS_CREATE_DELETE, Permission.PROFILES_MANAGE)
+    ),
     db: Session = Depends(get_db),
 ) -> PrusaSlicerPreviewResult:
     """Inspect PrusaSlicer .ini / .zip files and return selectable items without modifying the DB."""
@@ -1008,7 +1527,7 @@ async def admin_preview_prusaslicer(
             detail={"code": "NO_FILES", "message": "At least one .ini or .zip file is required"},
         )
 
-    can_filaments = has_permission(caller, Permission.FILAMENTS_MANAGE)
+    can_filaments = has_permission(caller, Permission.FILAMENTS_CREATE_DELETE)
     can_profiles = has_permission(caller, Permission.PROFILES_MANAGE)
 
     existing_filament_names = {
@@ -1102,7 +1621,9 @@ async def admin_import_prusaslicer(
     import_machines: bool = Form(default=True),
     update_existing: bool = Form(default=True),
     selected_keys: Optional[str] = Form(default=None),
-    caller: User = Depends(require_any_permission(Permission.FILAMENTS_MANAGE, Permission.PROFILES_MANAGE)),
+    caller: User = Depends(
+        require_any_permission(Permission.FILAMENTS_CREATE_DELETE, Permission.PROFILES_MANAGE)
+    ),
     db: Session = Depends(get_db),
 ) -> PrusaSlicerImportResult:
     """Import PrusaSlicer .ini config bundles, flat .ini configs, or .zip archives."""
@@ -1125,7 +1646,7 @@ async def admin_import_prusaslicer(
                 detail={"code": "INVALID_SELECTION", "message": f"Invalid selected_keys payload: {exc}"},
             ) from exc
 
-    can_filaments = has_permission(caller, Permission.FILAMENTS_MANAGE)
+    can_filaments = has_permission(caller, Permission.FILAMENTS_CREATE_DELETE)
     can_profiles = has_permission(caller, Permission.PROFILES_MANAGE)
 
     imported_filaments: list[OrcaFilamentImportItem] = []
@@ -1362,7 +1883,7 @@ async def admin_import_prusaslicer(
 @router.post("/profiles/test-slice", response_model=TestSliceResponse)
 def admin_test_slice_profile(
     body: TestSliceRequest,
-    _admin: User = Depends(require_permission(Permission.PROFILES_MANAGE)),
+    _admin: User = Depends(require_any_permission(Permission.PRINTERS_EDIT, Permission.PROFILES_MANAGE)),
     db: Session = Depends(get_db),
 ) -> TestSliceResponse:
     sys_settings = get_system_settings(db)
@@ -1392,7 +1913,7 @@ def admin_test_slice_profile(
 
 
 # ---------------------------------------------------------------------------
-# Permissions Catalog & Teachers (Admin Only)
+# Permissions Catalog & Account Management (Discord Hierarchy)
 # ---------------------------------------------------------------------------
 
 def _resolve_custom_permissions_json(
@@ -1400,69 +1921,118 @@ def _resolve_custom_permissions_json(
     permissions: Optional[list[str]],
     preset: Optional[str],
     reset_permissions: bool = False,
-) -> tuple[bool, Optional[str]]:
-    """Return (should_update, permissions_json_value) after validating preset or manual list."""
+    target_role: str = "teacher",
+) -> tuple[bool, Optional[str], Optional[str], Optional[int]]:
+    """Return (should_update, permissions_json_value, preset_role, preset_rank).
+
+    Rejects unknown keys with 400 and strictly admin-only keys with 403.
+    """
     if reset_permissions:
-        return True, None
+        return True, None, None, None
     if preset is not None:
         try:
-            resolved = resolve_preset(preset)
+            spec = get_preset_spec(preset)
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "INVALID_PRESET", "message": str(exc)},
             ) from exc
-        return True, json.dumps(resolved)
+        return True, json.dumps(sorted(spec.permissions)), spec.role, spec.default_rank
     if permissions is not None:
         try:
-            validated = validate_permission_keys(permissions)
+            validated = validate_delegatable_permissions(permissions)
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "ADMIN_ONLY_PERMISSION", "message": str(exc)},
+            ) from exc
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "INVALID_PERMISSION", "message": str(exc)},
             ) from exc
-        return True, json.dumps(validated)
-    return False, None
+        return True, json.dumps(validated), None, None
+    return False, None, None, None
 
 
 @router.get("/permissions/catalog", response_model=PermissionCatalogOut)
 def admin_get_permissions_catalog(
-    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.ACCOUNTS_VIEW)),
 ) -> PermissionCatalogOut:
-    """Return all available permissions, quick presets, and default role permissions."""
+    """Return all available permissions, quick presets, role defaults, and admin-only keys."""
     return PermissionCatalogOut(
         permissions=[
-            PermissionCatalogItem(key=perm.value, group=group)
-            for perm, group in PERMISSION_CATALOG
+            PermissionCatalogItem(
+                key=perm.value,
+                group=group,
+                resource=resource,
+                admin_only=admin_only,
+            )
+            for perm, group, resource, admin_only in PERMISSION_CATALOG
         ],
         presets=[
-            PermissionPresetOut(id=preset_id, permissions=sorted(perms))
-            for preset_id, perms in PERMISSION_PRESETS.items()
+            PermissionPresetOut(
+                id=pdef.id,
+                role=pdef.role,
+                default_rank=pdef.default_rank,
+                permissions=sorted(pdef.permissions),
+            )
+            for pdef in PERMISSION_PRESET_DEFS.values()
         ],
         role_defaults={
             role: get_permissions_for_role(role)
-            for role in ("student", "teacher", "admin")
+            for role in ("student", "teacher", "tech", "admin")
         },
+        admin_only_permissions=sorted(ADMIN_ONLY_PERMISSION_KEYS),
     )
 
 
+@router.get("/accounts", response_model=list[AdminTeacherOut])
 @router.get("/teachers", response_model=list[AdminTeacherOut])
 def admin_list_teachers(
-    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(require_permission(Permission.ACCOUNTS_VIEW)),
     db: Session = Depends(get_db),
 ) -> list[AdminTeacherOut]:
-    teachers = list(
-        db.scalars(select(User).where(User.role == "teacher").order_by(User.name.asc(), User.id.asc()))
+    staff_users = list(
+        db.scalars(
+            select(User)
+            .where(User.role.in_(("admin", "teacher", "tech")))
+            .order_by(User.hierarchy_rank.desc(), User.name.asc(), User.id.asc())
+        )
     )
-    return [_serialize_teacher(db, t) for t in teachers]
+    return [_serialize_teacher(db, acc, caller=caller) for acc in staff_users]
 
 
-def _assert_delegation_ceiling(caller: User, requested_permissions: Iterable[str]) -> None:
-    """Prevent non-admin callers from granting permissions they do not themselves hold."""
+def _assert_delegation_ceiling(
+    caller: User,
+    requested_permissions: Iterable[str],
+    target_rank: int,
+) -> None:
+    """Enforce Discord-style ceiling: rank <= caller rank and permissions subset of caller's."""
+    requested = set(requested_permissions)
+    forbidden_admin = sorted(requested & ADMIN_ONLY_PERMISSION_KEYS)
+    if forbidden_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ADMIN_ONLY_PERMISSION",
+                "message": f"Admin-only permission(s) cannot be delegated: {', '.join(forbidden_admin)}",
+            },
+        )
     if caller.role == "admin":
         return
-    caller_perms = set(get_user_permissions(caller))
-    requested = set(requested_permissions)
+
+    caller_rank = get_effective_rank(caller)
+    if target_rank > caller_rank:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "RANK_EXCEEDED",
+                "message": f"Cannot assign rank {target_rank} above your own rank ({caller_rank}).",
+            },
+        )
+
+    caller_perms = expand_implied_permissions(get_user_permissions(caller))
     excess = sorted(requested - caller_perms)
     if excess:
         raise HTTPException(
@@ -1474,29 +2044,82 @@ def _assert_delegation_ceiling(caller: User, requested_permissions: Iterable[str
         )
 
 
-def _assert_can_manage_target_teacher(caller: User, target_teacher: User) -> None:
-    """Prevent non-admin callers from modifying, resetting, or deleting a teacher with higher permissions."""
+def _assert_can_manage_target_teacher(caller: User, target_account: User) -> None:
+    """Enforce Discord hierarchy rules before mutating a staff account."""
+    if target_account.role == "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "ADMIN_PROTECTED",
+                "message": "Super Admin accounts cannot be modified through Account Management.",
+            },
+        )
     if caller.role == "admin":
         return
-    caller_perms = set(get_user_permissions(caller))
-    target_perms = set(get_user_permissions(target_teacher))
+    if target_account.id == caller.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "You cannot modify or manage your own account here.",
+            },
+        )
+    if get_effective_rank(target_account) > get_effective_rank(caller):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "RANK_EXCEEDED",
+                "message": "Cannot manage an account with a higher rank than your own.",
+            },
+        )
+    caller_perms = expand_implied_permissions(get_user_permissions(caller))
+    target_perms = expand_implied_permissions(get_user_permissions(target_account))
     excess = sorted(target_perms - caller_perms)
     if excess:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "FORBIDDEN",
-                "message": "Cannot manage a teacher who holds permissions you do not have",
+                "message": "Cannot manage an account that holds permissions you do not have.",
             },
         )
 
 
+@router.post("/accounts", response_model=AdminTeacherOut, status_code=status.HTTP_201_CREATED)
 @router.post("/teachers", response_model=AdminTeacherOut, status_code=status.HTTP_201_CREATED)
 def admin_create_teacher(
     body: AdminTeacherCreate,
-    caller: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(
+        require_any_permission(Permission.ACCOUNTS_CREATE_TECH, Permission.ACCOUNTS_CREATE_TEACHER)
+    ),
     db: Session = Depends(get_db),
 ) -> AdminTeacherOut:
+    should_set_perms, perms_json, preset_role, preset_rank = _resolve_custom_permissions_json(
+        permissions=body.permissions,
+        preset=body.preset,
+        target_role=body.role,
+    )
+    fields = body.model_fields_set
+    target_role = body.role if "role" in fields else (preset_role or body.role)
+    if target_role == "tech" and not has_permission(caller, Permission.ACCOUNTS_CREATE_TECH):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Permission 'accounts:create_tech' is required to create Lab Tech accounts.",
+                "required_permission": Permission.ACCOUNTS_CREATE_TECH.value,
+            },
+        )
+    if target_role == "teacher" and not has_permission(caller, Permission.ACCOUNTS_CREATE_TEACHER):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Permission 'accounts:create_teacher' is required to create Teacher accounts.",
+                "required_permission": Permission.ACCOUNTS_CREATE_TEACHER.value,
+            },
+        )
+
     existing = db.scalar(select(User).where(User.da == body.identifier))
     if existing is not None:
         raise HTTPException(
@@ -1506,22 +2129,29 @@ def admin_create_teacher(
                 "message": "Un compte existe déjà avec cet identifiant.",
             },
         )
-    should_set_perms, perms_json = _resolve_custom_permissions_json(
-        permissions=body.permissions,
-        preset=body.preset,
+
+    target_rank = (
+        body.hierarchy_rank
+        if body.hierarchy_rank is not None
+        else (preset_rank if preset_rank is not None else ROLE_DEFAULT_RANK.get(target_role, 50))
     )
+    target_rank = max(1, min(99, int(target_rank)))
+    if caller.role != "admin" and body.hierarchy_rank is None:
+        target_rank = min(target_rank, get_effective_rank(caller))
+
     effective_target_perms = (
         json.loads(perms_json)
         if (should_set_perms and perms_json is not None)
-        else get_permissions_for_role("teacher")
+        else get_permissions_for_role(target_role)
     )
-    _assert_delegation_ceiling(caller, effective_target_perms)
+    _assert_delegation_ceiling(caller, effective_target_perms, target_rank)
 
     teacher = User(
         da=body.identifier,
         name=body.name.strip(),
         password_hash=hash_password(body.password),
-        role="teacher",
+        role=target_role,
+        hierarchy_rank=target_rank,
         approval_status="approved",
         is_active=True,
         permissions_json=perms_json if should_set_perms else None,
@@ -1529,44 +2159,105 @@ def admin_create_teacher(
     db.add(teacher)
     db.commit()
     db.refresh(teacher)
-    return _serialize_teacher(db, teacher)
+    return _serialize_teacher(db, teacher, caller=caller)
 
 
+@router.patch("/accounts/{teacher_id}", response_model=AdminTeacherOut)
 @router.patch("/teachers/{teacher_id}", response_model=AdminTeacherOut)
 def admin_patch_teacher(
     teacher_id: int,
     body: AdminTeacherPatch,
-    caller: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(
+        require_any_permission(Permission.ACCOUNTS_EDIT_PERMISSIONS, Permission.ACCOUNTS_MANAGE_STATUS)
+    ),
     db: Session = Depends(get_db),
 ) -> AdminTeacherOut:
     teacher = db.get(User, teacher_id)
-    if teacher is None or teacher.role != "teacher":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Teacher not found")
+    if teacher is None or teacher.role not in ("admin", "teacher", "tech"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Staff account not found")
 
     _assert_can_manage_target_teacher(caller, teacher)
 
     fields = body.model_fields_set
-    should_set_perms, perms_json = _resolve_custom_permissions_json(
+    modifying_perms_or_rank = (
+        "permissions" in fields
+        or "preset" in fields
+        or body.reset_permissions
+        or ("hierarchy_rank" in fields and body.hierarchy_rank is not None)
+        or ("role" in fields and body.role is not None)
+    )
+    if modifying_perms_or_rank and not has_permission(caller, Permission.ACCOUNTS_EDIT_PERMISSIONS):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Permission 'accounts:edit_permissions' is required.",
+                "required_permission": Permission.ACCOUNTS_EDIT_PERMISSIONS.value,
+            },
+        )
+    if ("is_active" in fields or "name" in fields) and not has_permission(
+        caller, Permission.ACCOUNTS_MANAGE_STATUS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Permission 'accounts:manage_status' is required.",
+                "required_permission": Permission.ACCOUNTS_MANAGE_STATUS.value,
+            },
+        )
+
+    should_set_perms, perms_json, preset_role, preset_rank = _resolve_custom_permissions_json(
         permissions=body.permissions if "permissions" in fields else None,
         preset=body.preset if "preset" in fields else None,
         reset_permissions=body.reset_permissions,
     )
-    if should_set_perms:
-        if caller.role != "admin" and teacher.id == caller.id:
+
+    next_role = body.role if ("role" in fields and body.role is not None) else teacher.role
+    if next_role != teacher.role and caller.role != "admin":
+        if next_role == "tech" and not has_permission(caller, Permission.ACCOUNTS_CREATE_TECH):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "code": "FORBIDDEN",
-                    "message": "You cannot modify your own permissions",
+                    "message": "Permission 'accounts:create_tech' is required to assign Lab Tech role.",
+                    "required_permission": Permission.ACCOUNTS_CREATE_TECH.value,
                 },
             )
+        if next_role == "teacher" and not has_permission(caller, Permission.ACCOUNTS_CREATE_TEACHER):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Permission 'accounts:create_teacher' is required to assign Teacher role.",
+                    "required_permission": Permission.ACCOUNTS_CREATE_TEACHER.value,
+                },
+            )
+
+    next_rank = (
+        body.hierarchy_rank
+        if ("hierarchy_rank" in fields and body.hierarchy_rank is not None)
+        else (preset_rank if preset_rank is not None and "hierarchy_rank" not in fields else get_effective_rank(teacher))
+    )
+    next_rank = max(1, min(99, int(next_rank)))
+    if caller.role != "admin" and body.hierarchy_rank is None and preset_rank is not None:
+        next_rank = min(next_rank, get_effective_rank(caller))
+
+    if should_set_perms or "hierarchy_rank" in fields or "role" in fields:
         effective_target_perms = (
             json.loads(perms_json)
-            if perms_json is not None
-            else get_permissions_for_role("teacher")
+            if (should_set_perms and perms_json is not None)
+            else (
+                get_permissions_for_role(next_role)
+                if body.reset_permissions
+                else get_user_permissions(teacher)
+            )
         )
-        _assert_delegation_ceiling(caller, effective_target_perms)
-        teacher.permissions_json = perms_json
+        _assert_delegation_ceiling(caller, effective_target_perms, next_rank)
+        teacher.role = next_role
+        teacher.hierarchy_rank = next_rank
+        if should_set_perms:
+            teacher.permissions_json = perms_json
 
     if "name" in fields and body.name is not None:
         teacher.name = body.name.strip()
@@ -1575,19 +2266,20 @@ def admin_patch_teacher(
 
     db.commit()
     db.refresh(teacher)
-    return _serialize_teacher(db, teacher)
+    return _serialize_teacher(db, teacher, caller=caller)
 
 
+@router.post("/accounts/{teacher_id}/reset-password", response_model=ResetPasswordResponse)
 @router.post("/teachers/{teacher_id}/reset-password", response_model=ResetPasswordResponse)
 def admin_reset_teacher_password(
     teacher_id: int,
     body: Optional[ResetPasswordRequest] = None,
-    caller: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(require_permission(Permission.ACCOUNTS_MANAGE_STATUS)),
     db: Session = Depends(get_db),
 ) -> ResetPasswordResponse:
     teacher = db.get(User, teacher_id)
-    if teacher is None or teacher.role != "teacher":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Teacher not found")
+    if teacher is None or teacher.role not in ("admin", "teacher", "tech"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Staff account not found")
 
     _assert_can_manage_target_teacher(caller, teacher)
 
@@ -1603,19 +2295,20 @@ def admin_reset_teacher_password(
     return ResetPasswordResponse(da=teacher.da, temp_password=temp_pwd)
 
 
+@router.delete("/accounts/{teacher_id}", status_code=status.HTTP_204_NO_CONTENT)
 @router.delete("/teachers/{teacher_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_teacher(
     teacher_id: int,
-    caller: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(require_permission(Permission.ACCOUNTS_DELETE)),
     db: Session = Depends(get_db),
 ) -> None:
     teacher = db.scalar(
         select(User)
-        .where(User.id == teacher_id, User.role == "teacher")
+        .where(User.id == teacher_id, User.role.in_(("admin", "teacher", "tech")))
         .options(selectinload(User.classes).selectinload(TeacherClass.enrollments))
     )
     if teacher is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Teacher not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Staff account not found")
 
     _assert_can_manage_target_teacher(caller, teacher)
 
@@ -1738,7 +2431,7 @@ def admin_create_class(
     else:
         if body.teacher_id is not None:
             teacher = db.get(User, body.teacher_id)
-            if teacher is None or teacher.role != "teacher" or not teacher.is_active:
+            if teacher is None or teacher.role not in ("teacher", "tech") or not teacher.is_active:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={"code": "TEACHER_NOT_FOUND", "message": "Target teacher not found or inactive"},
@@ -2415,6 +3108,15 @@ def admin_refresh_student_budgets(
     db: Session = Depends(get_db),
 ) -> BudgetRefreshResult:
     """Manually refresh active used grams and/or max gram limits for users, a class, or all students."""
+    if not has_permission(staff_user, Permission.STUDENTS_ADJUST_QUOTAS):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Permission 'students:adjust_quotas' is required.",
+                "required_permission": Permission.STUDENTS_ADJUST_QUOTAS.value,
+            },
+        )
     can_manage_all = has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL)
     tc: Optional[TeacherClass] = None
 
@@ -2513,6 +3215,17 @@ def admin_patch_student(
         _ensure_teacher_owns_student(db, staff_user.id, user.da)
 
     fields = body.model_fields_set
+    if ("max_active_grams_override" in fields or "max_print_minutes_override" in fields) and not has_permission(
+        staff_user, Permission.STUDENTS_ADJUST_QUOTAS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Permission 'students:adjust_quotas' is required to edit student quotas.",
+                "required_permission": Permission.STUDENTS_ADJUST_QUOTAS.value,
+            },
+        )
     if "is_active" in fields and body.is_active is not None:
         user.is_active = body.is_active
     if "max_active_grams_override" in fields:
@@ -2541,6 +3254,15 @@ def admin_reset_student_password(
     staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> ResetPasswordResponse:
+    if not has_permission(staff_user, Permission.STUDENTS_RESET_PASSWORD):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Permission 'students:reset_password' is required.",
+                "required_permission": Permission.STUDENTS_RESET_PASSWORD.value,
+            },
+        )
     user = db.get(User, user_id)
     if user is None or user.role != "student":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
@@ -2562,7 +3284,7 @@ def admin_reset_student_password(
 
 @router.get("/account-requests", response_model=list[PendingAccountOut])
 def admin_list_account_requests(
-    staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
+    staff_user: User = Depends(require_permission(Permission.APPROVALS_ACCOUNTS_OWN)),
     db: Session = Depends(get_db),
 ) -> list[PendingAccountOut]:
     stmt = (
@@ -2571,7 +3293,7 @@ def admin_list_account_requests(
         .options(selectinload(User.requested_teacher))
         .order_by(User.created_at.asc(), User.id.asc())
     )
-    if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL):
+    if not has_permission(staff_user, Permission.APPROVALS_ACCOUNTS_ALL):
         stmt = stmt.where(User.requested_teacher_id == staff_user.id)
     pending_users = list(db.scalars(stmt))
     return [_serialize_pending_account(u) for u in pending_users]
@@ -2581,7 +3303,7 @@ def admin_list_account_requests(
 def admin_decide_account_request(
     user_id: int,
     body: AccountDecisionRequest,
-    staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
+    staff_user: User = Depends(require_permission(Permission.APPROVALS_ACCOUNTS_OWN)),
     db: Session = Depends(get_db),
 ) -> PendingAccountOut:
     user = db.scalar(
@@ -2590,13 +3312,13 @@ def admin_decide_account_request(
     if user is None or user.role != "student":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student account request not found")
 
-    if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL) and user.requested_teacher_id != staff_user.id:
+    if not has_permission(staff_user, Permission.APPROVALS_ACCOUNTS_ALL) and user.requested_teacher_id != staff_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "FORBIDDEN",
                 "message": "This account request is assigned to another teacher",
-                "required_permission": Permission.STUDENTS_MANAGE_ALL.value,
+                "required_permission": Permission.APPROVALS_ACCOUNTS_ALL.value,
             },
         )
 
@@ -2617,7 +3339,11 @@ def admin_decide_account_request(
         target_cls = db.get(TeacherClass, body.class_id)
         if target_cls is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
-        if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL) and target_cls.teacher_id != staff_user.id:
+        if (
+            not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL)
+            and not has_permission(staff_user, Permission.APPROVALS_ACCOUNTS_ALL)
+            and target_cls.teacher_id != staff_user.id
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
@@ -2627,11 +3353,10 @@ def admin_decide_account_request(
                 },
             )
     else:
-        target_teacher_id = (
-            staff_user.id
-            if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL)
-            else user.requested_teacher_id
+        can_route_any = has_permission(staff_user, Permission.CLASSES_MANAGE_ALL) or has_permission(
+            staff_user, Permission.APPROVALS_ACCOUNTS_ALL
         )
+        target_teacher_id = staff_user.id if not can_route_any else user.requested_teacher_id
         if target_teacher_id is None:
             target_teacher_id = db.scalar(
                 select(User.id)
@@ -2674,7 +3399,7 @@ def admin_decide_account_request(
 
 @router.get("/approvals", response_model=ApprovalsResponse)
 def admin_list_approvals(
-    staff_user: User = Depends(require_permission(Permission.APPROVALS_MANAGE_OWN)),
+    staff_user: User = Depends(require_permission(Permission.APPROVALS_JOBS_OWN)),
     db: Session = Depends(get_db),
 ) -> ApprovalsResponse:
     sys_settings = get_system_settings(db)
@@ -2703,7 +3428,7 @@ def admin_list_approvals(
         .order_by(PrintJob.reviewed_at.desc(), PrintJob.id.desc())
         .limit(30)
     )
-    if not has_permission(staff_user, Permission.APPROVALS_MANAGE_ALL):
+    if not has_permission(staff_user, Permission.APPROVALS_JOBS_ALL):
         pending_stmt = pending_stmt.where(PrintJob.teacher_id == staff_user.id)
         history_stmt = history_stmt.where(PrintJob.teacher_id == staff_user.id)
 
@@ -2719,7 +3444,7 @@ def admin_list_approvals(
 async def admin_decide_approval(
     job_id: int,
     body: ApprovalDecisionRequest,
-    staff_user: User = Depends(require_permission(Permission.APPROVALS_MANAGE_OWN)),
+    staff_user: User = Depends(require_permission(Permission.APPROVALS_JOBS_OWN)),
     db: Session = Depends(get_db),
 ) -> JobDetail:
     sys_settings = get_system_settings(db)
@@ -2736,13 +3461,13 @@ async def admin_decide_approval(
     )
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    if not has_permission(staff_user, Permission.APPROVALS_MANAGE_ALL) and job.teacher_id != staff_user.id:
+    if not has_permission(staff_user, Permission.APPROVALS_JOBS_ALL) and job.teacher_id != staff_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "code": "FORBIDDEN",
                 "message": "This print approval request is assigned to another teacher",
-                "required_permission": Permission.APPROVALS_MANAGE_ALL.value,
+                "required_permission": Permission.APPROVALS_JOBS_ALL.value,
             },
         )
     if job.status != JobStatus.PENDING_APPROVAL.value:
@@ -2762,6 +3487,15 @@ async def admin_decide_approval(
         return serialize_job(db, job, sys_settings)
 
     if body.decision == "approve_and_raise":
+        if not has_permission(staff_user, Permission.STUDENTS_ADJUST_QUOTAS):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Permission 'students:adjust_quotas' is required to raise student limits.",
+                    "required_permission": Permission.STUDENTS_ADJUST_QUOTAS.value,
+                },
+            )
         if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL):
             if not has_permission(staff_user, Permission.STUDENTS_MANAGE_OWN):
                 raise HTTPException(
@@ -2802,7 +3536,7 @@ async def admin_decide_approval(
 @router.get("/system/update-status", response_model=SystemUpdateStatusOut)
 async def admin_get_update_status(
     force: bool = False,
-    _caller: User = Depends(require_permission(Permission.UPDATES_MANAGE)),
+    _caller: User = Depends(require_super_admin),
 ) -> SystemUpdateStatusOut:
     """Check GitHub Releases for the latest version of GGPrint-Web and current updater job status."""
     return await check_latest_github_release(force=force)
@@ -2815,7 +3549,7 @@ async def admin_get_update_status(
 )
 async def admin_trigger_update(
     body: Optional[UpdateTriggerRequest] = None,
-    caller: User = Depends(require_permission(Permission.UPDATES_MANAGE)),
+    caller: User = Depends(require_super_admin),
 ) -> UpdateJobStatusOut:
     """Queue an on-demand host update to a specific release tag (or the latest GitHub release)."""
     target = (body.target_version or "").strip() if body else ""
@@ -2835,7 +3569,7 @@ async def admin_trigger_update(
 
 @router.get("/settings", response_model=SystemSettingsOut)
 def admin_get_settings(
-    _admin: User = Depends(require_permission(Permission.SETTINGS_MANAGE)),
+    _admin: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> SystemSettingsOut:
     return serialize_settings(get_system_settings(db))
@@ -2844,7 +3578,7 @@ def admin_get_settings(
 @router.patch("/settings", response_model=SystemSettingsOut)
 def admin_patch_settings(
     body: SystemSettingsPatch,
-    _admin: User = Depends(require_permission(Permission.SETTINGS_MANAGE)),
+    _admin: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> SystemSettingsOut:
     sys_settings = get_system_settings(db)
@@ -2894,6 +3628,8 @@ def admin_patch_settings(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "INVALID_SLICER_PATH", "message": str(exc)},
             ) from exc
+    if "max_concurrent_slices" in fields and body.max_concurrent_slices is not None:
+        sys_settings.max_concurrent_slices = body.max_concurrent_slices
     if "filament_api_enabled" in fields and body.filament_api_enabled is not None:
         sys_settings.filament_api_enabled = body.filament_api_enabled
     if "filament_api_url" in fields and body.filament_api_url is not None:
@@ -2901,7 +3637,22 @@ def admin_patch_settings(
 
     db.commit()
     db.refresh(sys_settings)
+    slice_queue.set_max_workers(sys_settings.max_concurrent_slices)
     return serialize_settings(sys_settings)
+
+
+@router.post("/settings/test-orcaslicer", response_model=SetupTestOrcaOut)
+def admin_test_orcaslicer(
+    body: Optional[SetupTestOrcaRequest] = None,
+    _admin: User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+) -> SetupTestOrcaOut:
+    """Probe the configured or candidate OrcaSlicer CLI binary."""
+    sys_settings = get_system_settings(db)
+    raw_path = (body.orca_cli_path if body and body.orca_cli_path.strip() else sys_settings.orca_cli_path) or ""
+    resolved_path = detect_orca_cli_path(raw_path) or (raw_path.strip() or None)
+    ok, version, detail = probe_orcaslicer(raw_path)
+    return SetupTestOrcaOut(ok=ok, path=resolved_path if ok else None, version=version, detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -2911,7 +3662,7 @@ def admin_patch_settings(
 @router.post("/filament-api/test", response_model=FilamentApiHealthOut)
 async def admin_test_filament_api(
     body: Optional[FilamentApiTestRequest] = None,
-    _admin: User = Depends(require_permission(Permission.SETTINGS_MANAGE)),
+    _admin: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> FilamentApiHealthOut:
     """Test connectivity to FilamentAPI using the provided URL or saved setting."""
@@ -2923,7 +3674,7 @@ async def admin_test_filament_api(
 
 @router.get("/filament-api/printers", response_model=list[FilamentApiPrinterOut])
 async def admin_list_filament_api_printers(
-    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_VIEW)),
     db: Session = Depends(get_db),
 ) -> list[FilamentApiPrinterOut]:
     """List printers configured in FilamentAPI for mapping in the admin panel."""
@@ -2939,7 +3690,7 @@ async def admin_list_filament_api_printers(
 
 @router.post("/printers/sync-filaments", response_model=FilamentSyncResponse)
 async def admin_sync_printer_filaments(
-    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE_SLOTS)),
     db: Session = Depends(get_db),
 ) -> FilamentSyncResponse:
     """Query FilamentAPI for all mapped printers and update their loaded filaments."""

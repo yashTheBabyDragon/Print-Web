@@ -577,15 +577,18 @@ def _ensure_profile_file(filename: str, payload: dict) -> Path:
 
 
 def seed_database(db: Session) -> None:
-    """Ensure SystemSettings exists and seed dev demo data when DEV_SEED=true."""
+    """Ensure SystemSettings exists, bootstrap optional admin/dev data cleanly."""
     detected_cli = detect_orca_cli_path(settings.orca_cli_path_override)
     if settings.dev_seed:
         default_mode = settings.slicer_mode_override or ("orcaslicer" if detected_cli else "mock")
-        default_fdm_mode = "mock"
+        default_fdm_mode = settings.default_fdm_monster_mode if settings.default_fdm_monster_mode else "mock"
     else:
         default_mode = "orcaslicer"
         default_fdm_mode = "live"
-    default_cli = detected_cli or "orca-slicer"
+    default_cli = detected_cli or settings.default_orca_cli_path or "orca-slicer"
+
+    admin_exists = db.scalar(select(User.id).where(User.role == "admin").limit(1)) is not None
+    will_seed_admin = bool(settings.dev_seed or settings.admin_password.strip())
 
     sys_settings = db.get(SystemSettings, 1)
     if sys_settings is None:
@@ -593,7 +596,9 @@ def seed_database(db: Session) -> None:
             id=1,
             slicer_mode=default_mode,
             fdm_monster_mode=default_fdm_mode,
+            fdm_monster_url=settings.default_fdm_monster_url,
             orca_cli_path=default_cli,
+            setup_completed=bool(admin_exists or will_seed_admin),
         )
         db.add(sys_settings)
         db.commit()
@@ -621,8 +626,31 @@ def seed_database(db: Session) -> None:
             sys_settings.slicer_mode = "orcaslicer"
             sys_settings.orca_cli_path = detected_cli
             dirty = True
+        if (admin_exists or will_seed_admin) and not sys_settings.setup_completed:
+            sys_settings.setup_completed = True
+            dirty = True
         if dirty:
             db.commit()
+
+    # In production (DEV_SEED=false), bootstrap the initial Main Admin if ADMIN_PASSWORD is set
+    # and no admin account exists yet.
+    if settings.admin_password.strip():
+        if not admin_exists:
+            admin_da = settings.admin_username.strip().lower() or "admin"
+            if db.scalar(select(User.id).where(User.da == admin_da).limit(1)) is None:
+                db.add(
+                    User(
+                        da=admin_da,
+                        name=settings.admin_name.strip() or "Admin FabLab",
+                        password_hash=hash_password(settings.admin_password.strip()),
+                        role="admin",
+                        hierarchy_rank=100,
+                        approval_status="approved",
+                        is_active=True,
+                    )
+                )
+                sys_settings.setup_completed = True
+                db.commit()
 
     if not settings.dev_seed:
         return
@@ -635,6 +663,7 @@ def seed_database(db: Session) -> None:
             name="Admin FabLab",
             password_hash=hash_password("admin123"),
             role="admin",
+            hierarchy_rank=100,
             approval_status="approved",
             is_active=True,
         )
@@ -647,6 +676,7 @@ def seed_database(db: Session) -> None:
             name="Étudiant Démo",
             password_hash=hash_password("student123"),
             role="student",
+            hierarchy_rank=0,
             approval_status="approved",
             is_active=True,
         )
@@ -702,6 +732,7 @@ def seed_database(db: Session) -> None:
                 name=t_name,
                 password_hash=hash_password(t_pw),
                 role="teacher",
+                hierarchy_rank=50,
                 approval_status="approved",
                 is_active=True,
             )

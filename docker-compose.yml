@@ -47,7 +47,7 @@ services:
       - ggprint_data:/data
       - ggprint_profiles:/profiles
       - ${GGPRINT_UPDATER_DIR:-./data/updater}:/updater
-      # Uncomment on Proxmox once OrcaSlicer AppImage is extracted to /opt/orcaslicer:
+      # OrcaSlicer is baked into /opt/orcaslicer-builtin; optionally mount a host override here:
       # - /opt/orcaslicer:/opt/orcaslicer:ro
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"

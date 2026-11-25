@@ -130,4 +130,59 @@ describe('AdminPrintersTab', () => {
     expect(onReload).toHaveBeenCalledTimes(2);
     expect(onError).not.toHaveBeenCalled();
   });
+
+  it('opens Add Printer modal in manual mode and switches to OrcaSlicer Profiles sub-tab', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'adminGetOrcaCatalogVendors').mockResolvedValue([]);
+    vi.spyOn(api, 'adminCreatePrinter').mockResolvedValue({
+      ...MOCK_PRINTERS[0],
+      id: 2,
+      name: 'Standalone Voron',
+      display_name: 'Standalone Voron',
+      fdm_monster_id: 'manual-standalone-voron',
+      printer_type: 'klipper',
+      is_manual: true,
+      is_fdm_linked: false,
+      bed_x_mm: 300,
+      bed_y_mm: 300,
+      bed_z_mm: 300,
+    });
+    const onReload = vi.fn().mockResolvedValue(undefined);
+    const onError = vi.fn();
+
+    render(
+      <I18nProvider>
+        <AdminPrintersTab
+          printers={MOCK_PRINTERS}
+          filaments={MOCK_FILAMENTS}
+          profiles={MOCK_PROFILES}
+          filamentApiEnabled={false}
+          filamentApiPrinters={[]}
+          onReload={onReload}
+          onError={onError}
+        />
+      </I18nProvider>
+    );
+
+    await user.click(screen.getByRole('tab', { name: /OrcaSlicer Profiles/i }));
+    expect(screen.getByRole('button', { name: /Import profile/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: /Printers & MMU/i }));
+    await user.click(screen.getByRole('button', { name: /Add printer/i }));
+
+    await user.click(await screen.findByRole('button', { name: /Manual \/ JSON Files/i }));
+    await user.type(screen.getByPlaceholderText(/Prusa MK4S Lab #1/i), 'Standalone Voron');
+    await user.click(screen.getByRole('button', { name: /Create Printer/i }));
+
+    await waitFor(() => {
+      expect(api.adminCreatePrinter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          display_name: 'Standalone Voron',
+          fdm_monster_id: null,
+        })
+      );
+    });
+    expect(onReload).toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
 });

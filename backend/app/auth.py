@@ -137,8 +137,8 @@ def get_current_user(
 
 
 def require_staff(current_user: User = Depends(get_current_user)) -> User:
-    """Ensure the authenticated user is a teacher or main administrator."""
-    if current_user.role not in ("admin", "teacher"):
+    """Ensure the authenticated user is a staff member (admin, teacher, or lab tech)."""
+    if current_user.role not in ("admin", "teacher", "tech"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "ADMIN_REQUIRED", "message": "Staff privileges required"},

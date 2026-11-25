@@ -72,6 +72,8 @@ def detect_orca_cli_path(preferred_path: Optional[str] = None) -> Optional[str]:
             Path("/usr/bin/orca-slicer"),
             Path("/opt/orcaslicer/AppRun"),
             Path("/opt/OrcaSlicer/AppRun"),
+            Path("/opt/orcaslicer-builtin/AppRun"),
+            Path("/opt/orcaslicer-builtin/bin/orca-slicer"),
             Path("/app/bin/orca-slicer"),
             Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer"),
         ]
@@ -108,6 +110,7 @@ def detect_orca_resources_profiles_dirs(cli_path: Optional[str] = None) -> list[
             Path(r"C:\Program Files (x86)\OrcaSlicer\resources\profiles"),
             Path("/opt/orcaslicer/resources/profiles"),
             Path("/opt/OrcaSlicer/resources/profiles"),
+            Path("/opt/orcaslicer-builtin/resources/profiles"),
             Path("/usr/share/OrcaSlicer/resources/profiles"),
             Path("/usr/local/share/OrcaSlicer/resources/profiles"),
         ]
@@ -172,6 +175,14 @@ class Settings(BaseSettings):
 
     dev_seed: bool = False
     institution: str = "Cégep Gérald-Godin"
+
+    admin_username: str = "admin"
+    admin_name: str = "Admin FabLab"
+    admin_password: str = ""
+    default_slicer_mode: str = "mock"
+    default_orca_cli_path: str = "orca-slicer"
+    default_fdm_monster_mode: str = "mock"
+    default_fdm_monster_url: str = "http://fdm-monster:4000"
 
     data_dir: Path = BACKEND_DIR / "data"
     sample_models_dir: Path = REPO_ROOT / "sample-models"

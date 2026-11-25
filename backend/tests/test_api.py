@@ -81,6 +81,7 @@ def test_health_and_auth_mode(client: TestClient):
     assert body["dev_mode"] is True
     assert body["slicer_mode"] == "mock"
     assert body["fdm_mode"] == "mock"
+    assert body["needs_setup"] is False
     assert "Gérald-Godin" in body["institution"]
 
 
@@ -209,7 +210,7 @@ def test_upload_auto_orient_transform_slice_and_bounds(client: TestClient):
     # Valid transform + slice (rotated 45 deg around Z, scaled 0.9, shifted +15mm X)
     angle = math.radians(45.0)
     r_slice = client.post(
-        f"/api/jobs/{job['id']}/slice",
+        f"/api/jobs/{job['id']}/slice?sync=true",
         headers=_auth_header(token),
         json={
             "printer_id": voron["id"],
@@ -258,7 +259,7 @@ def test_within_budget_submit_and_dev_complete_auto_refund(client: TestClient):
     ).json()
 
     sliced = client.post(
-        f"/api/jobs/{job['id']}/slice",
+        f"/api/jobs/{job['id']}/slice?sync=true",
         headers=_auth_header(token),
         json={
             "printer_id": mk4s["id"],
@@ -320,7 +321,7 @@ def test_oversized_approval_flows_approve_raise_reject_and_cancel(client: TestCl
             data={"printer_id": str(voron["id"]), "slot_id": str(slot["id"])},
         ).json()
         r = client.post(
-            f"/api/jobs/{j['id']}/slice",
+            f"/api/jobs/{j['id']}/slice?sync=true",
             headers=_auth_header(s_token),
             json={
                 "printer_id": voron["id"],
@@ -580,7 +581,7 @@ async def test_poller_auto_refund_and_duration_limit(client: TestClient):
     ).json()
 
     sliced = client.post(
-        f"/api/jobs/{job['id']}/slice",
+        f"/api/jobs/{job['id']}/slice?sync=true",
         headers=_auth_header(s_token),
         json={
             "printer_id": voron["id"],
@@ -648,7 +649,7 @@ def test_supports_toggle_affects_metrics_persistence_and_gcode(client: TestClien
     }
 
     r_on = client.post(
-        f"/api/jobs/{job['id']}/slice",
+        f"/api/jobs/{job['id']}/slice?sync=true",
         headers=_auth_header(token),
         json={**base_payload, "supports_enabled": True},
     )
@@ -667,7 +668,7 @@ def test_supports_toggle_affects_metrics_persistence_and_gcode(client: TestClien
     assert "; support_on_build_plate_only = 1" in gcode_on
 
     r_off = client.post(
-        f"/api/jobs/{job['id']}/slice",
+        f"/api/jobs/{job['id']}/slice?sync=true",
         headers=_auth_header(token),
         json={**base_payload, "supports_enabled": False},
     )
@@ -798,7 +799,7 @@ def test_teacher_management_and_rbac(client: TestClient):
     # Teacher CANNOT access /api/admin/printers (403 FORBIDDEN), CAN access own classes & public /api/printers
     r_admin_printers = client.get("/api/admin/printers", headers=_auth_header(ta_token))
     assert r_admin_printers.status_code == 403
-    assert r_admin_printers.json()["detail"]["required_permission"] == "printers:manage"
+    assert r_admin_printers.json()["detail"]["required_permission"] == "printers:view"
     assert client.get("/api/printers", headers=_auth_header(ta_token)).status_code == 200
     assert client.get("/api/admin/classes", headers=_auth_header(ta_token)).status_code == 200
 
@@ -1055,7 +1056,7 @@ def test_multi_teacher_print_approval_routing(client: TestClient):
             data={"printer_id": str(voron["id"]), "slot_id": str(slot["id"])},
         ).json()
         r = client.post(
-            f"/api/jobs/{j['id']}/slice",
+            f"/api/jobs/{j['id']}/slice?sync=true",
             headers=_auth_header(s_token),
             json={
                 "printer_id": voron["id"],
@@ -1256,7 +1257,7 @@ def test_filament_api_settings_sync_and_slicer_auto_change(
     assert r_up.json()["filament_material"] == "PLA"
 
     r_slice = client.post(
-        f"/api/jobs/{job_id}/slice",
+        f"/api/jobs/{job_id}/slice?sync=true",
         headers=_auth_header(student_token),
         json={
             "printer_id": mk35["id"],
@@ -1366,7 +1367,7 @@ def test_gcode_endpoint_toolpaths_supports_and_access_control(client: TestClient
         "scale": 1.0,
         "supports_enabled": True,
     }
-    r_slice_on = client.post(f"/api/jobs/{job['id']}/slice", headers=_auth_header(s_token), json=slice_payload)
+    r_slice_on = client.post(f"/api/jobs/{job['id']}/slice?sync=true", headers=_auth_header(s_token), json=slice_payload)
     assert r_slice_on.status_code == 200, r_slice_on.text
     sliced_on = r_slice_on.json()
     assert sliced_on["gcode_url"] == f"/api/jobs/{job['id']}/gcode"
@@ -1384,7 +1385,7 @@ def test_gcode_endpoint_toolpaths_supports_and_access_control(client: TestClient
 
     # Re-slice with supports disabled -> omits ;TYPE:Support
     r_slice_off = client.post(
-        f"/api/jobs/{job['id']}/slice",
+        f"/api/jobs/{job['id']}/slice?sync=true",
         headers=_auth_header(s_token),
         json={**slice_payload, "supports_enabled": False},
     )

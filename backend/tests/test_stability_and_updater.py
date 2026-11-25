@@ -80,7 +80,7 @@ def test_update_status_available_up_to_date_404_offline_and_rbac(
 
     r_teacher = client.get("/api/admin/system/update-status", headers=_auth(t_token))
     assert r_teacher.status_code == 403
-    assert r_teacher.json()["detail"]["required_permission"] == "updates:manage"
+    assert r_teacher.json()["detail"]["code"] == "SUPER_ADMIN_REQUIRED"
 
     monkeypatch.setattr(settings, "app_version", "1.0.0")
     monkeypatch.setattr(settings, "github_repo", "yashTheBabyDragon/GGPrint-Web")
@@ -170,14 +170,14 @@ def test_update_trigger_rbac_validation_and_file_queue(
     t_token = t_login["access_token"]
     teacher_id = t_login["user"]["id"]
 
-    # 1. Default teacher -> 403 on update-trigger
+    # 1. Default teacher -> 403 SUPER_ADMIN_REQUIRED on update-trigger
     r_t_forbid = client.post(
         "/api/admin/system/update-trigger",
         headers=_auth(t_token),
         json={"target_version": "v1.2.0"},
     )
     assert r_t_forbid.status_code == 403
-    assert r_t_forbid.json()["detail"]["required_permission"] == "updates:manage"
+    assert r_t_forbid.json()["detail"]["code"] == "SUPER_ADMIN_REQUIRED"
 
     # 2. Updater not configured -> 400 UPDATER_NOT_CONFIGURED
     monkeypatch.setattr(settings, "updater_dir", None)
@@ -225,22 +225,21 @@ def test_update_trigger_rbac_validation_and_file_queue(
     assert r_dup.status_code == 409
     assert r_dup.json()["detail"]["code"] == "UPDATE_IN_PROGRESS"
 
-    # 6. Grant ONLY updates:manage to teacher -> teacher can inspect update-status and trigger once idle/succeeded
+    # 6. Admin-only updates:manage cannot be delegated to a teacher, and trigger stays SUPER_ADMIN_REQUIRED
     (upd_dir / "status.json").write_text('{"state": "succeeded", "target_version": "v1.2.0"}', encoding="utf-8")
     r_grant = client.patch(
         f"/api/admin/teachers/{teacher_id}",
         headers=_auth(a_token),
         json={"permissions": ["updates:manage"]},
     )
-    assert r_grant.status_code == 200
+    assert r_grant.status_code == 403
+    assert r_grant.json()["detail"]["code"] == "ADMIN_ONLY_PERMISSION"
 
-    # Teacher cannot view system settings, CAN trigger update
     assert client.get("/api/admin/settings", headers=_auth(t_token)).status_code == 403
-    r_t_ok = client.post(
+    r_t_denied = client.post(
         "/api/admin/system/update-trigger",
         headers=_auth(t_token),
         json={"target_version": "v1.3.0"},
     )
-    assert r_t_ok.status_code == 202, r_t_ok.text
-    assert r_t_ok.json()["state"] == "queued"
-    assert r_t_ok.json()["target_version"] == "v1.3.0"
+    assert r_t_denied.status_code == 403
+    assert r_t_denied.json()["detail"]["code"] == "SUPER_ADMIN_REQUIRED"

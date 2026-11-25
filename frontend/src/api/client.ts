@@ -1,5 +1,6 @@
 import type {
   AdminPrinter,
+  AdminPrinterCreate,
   AdminTeacher,
   ApprovalsResponse,
   AuthModeResponse,
@@ -13,6 +14,7 @@ import type {
   ClassEnrollment,
   ClassStudentRemoveResult,
   ClassTransferResult,
+  FdmMonsterRemotePrinter,
   Filament,
   FilamentApiHealth,
   FilamentApiPrinter,
@@ -20,6 +22,11 @@ import type {
   JobDetail,
   MyJobsResponse,
   NotificationSettings,
+  OrcaCatalogImportFilamentsResult,
+  OrcaCatalogImportPrinterPayload,
+  OrcaCatalogImportPrinterResult,
+  OrcaCatalogVendorDetail,
+  OrcaCatalogVendorSummary,
   OrcaFilamentImportResult,
   OrcaProfile,
   PendingAccountRequest,
@@ -30,6 +37,11 @@ import type {
   PrusaSlicerPreviewResult,
   RegisterResponse,
   SampleModel,
+  SetupCompletePayload,
+  SetupStatusResponse,
+  SetupTestFdmResponse,
+  SetupTestOrcaResponse,
+  SliceQueueStats,
   StudentAccount,
   SystemSettings,
   SystemUpdateStatus,
@@ -139,6 +151,38 @@ async function requestText(path: string, options: RequestInit = {}): Promise<str
 }
 
 export const api = {
+  // Setup Wizard
+  getSetupStatus: (token?: string | null) =>
+    request<SetupStatusResponse>(
+      token ? `/api/setup/status?token=${encodeURIComponent(token)}` : '/api/setup/status'
+    ),
+  testSetupOrcaSlicer: (orcaCliPath: string, token?: string | null) =>
+    request<SetupTestOrcaResponse>(
+      token
+        ? `/api/setup/test-orcaslicer?token=${encodeURIComponent(token)}`
+        : '/api/setup/test-orcaslicer',
+      {
+        method: 'POST',
+        body: JSON.stringify({ orca_cli_path: orcaCliPath }),
+      }
+    ),
+  testSetupFdmMonster: (url: string, apiKey?: string, token?: string | null) =>
+    request<SetupTestFdmResponse>(
+      token ? `/api/setup/test-fdm?token=${encodeURIComponent(token)}` : '/api/setup/test-fdm',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          fdm_monster_url: url,
+          fdm_monster_api_key: apiKey?.trim() ? apiKey.trim() : null,
+        }),
+      }
+    ),
+  completeSetup: (payload: SetupCompletePayload) =>
+    request<AuthResponse>('/api/setup/complete', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   // Auth
   getAuthMode: () => request<AuthModeResponse>('/api/auth/mode'),
   getPublicTeachers: () => request<TeacherPublic[]>('/api/auth/teachers'),
@@ -213,6 +257,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  getJob: (jobId: number) => request<JobDetail>(`/api/jobs/${jobId}`),
+  getSliceQueueStats: () => request<SliceQueueStats>('/api/jobs/queue/stats'),
   submitJob: (jobId: number) =>
     request<JobDetail>(`/api/jobs/${jobId}/submit`, { method: 'POST' }),
   requestApproval: (jobId: number, note: string, teacherId?: number | null) =>
@@ -228,6 +274,13 @@ export const api = {
 
   // Admin: Printers & Slots
   adminGetPrinters: () => request<AdminPrinter[]>('/api/admin/printers'),
+  adminCreatePrinter: (data: AdminPrinterCreate) =>
+    request<AdminPrinter>('/api/admin/printers', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  adminGetFdmMonsterPrinters: () =>
+    request<FdmMonsterRemotePrinter[]>('/api/admin/fdm-monster/printers'),
   adminSyncPrinters: () =>
     request<AdminPrinter[]>('/api/admin/printers/sync', { method: 'POST' }),
   adminUpdatePrinter: (
@@ -235,6 +288,8 @@ export const api = {
     data: Partial<{
       is_enabled: boolean;
       display_name: string;
+      printer_type: 'prusalink' | 'klipper';
+      fdm_monster_id: string | null;
       bed_x_mm: number;
       bed_y_mm: number;
       bed_z_mm: number;
@@ -259,6 +314,26 @@ export const api = {
     }),
   adminDeletePrinter: (printerId: number) =>
     request<void>(`/api/admin/printers/${printerId}`, { method: 'DELETE' }),
+
+  // Admin: OrcaSlicer Catalog
+  adminGetOrcaCatalogVendors: () =>
+    request<OrcaCatalogVendorSummary[]>('/api/admin/orca-catalog/vendors'),
+  adminGetOrcaCatalogVendorDetail: (vendor: string) =>
+    request<OrcaCatalogVendorDetail>(`/api/admin/orca-catalog/vendors/${encodeURIComponent(vendor)}`),
+  adminImportOrcaCatalogPrinter: (payload: OrcaCatalogImportPrinterPayload) =>
+    request<OrcaCatalogImportPrinterResult>('/api/admin/orca-catalog/import-printer', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  adminImportOrcaCatalogFilaments: (payload: {
+    vendor: string;
+    preset_names: string[];
+    update_existing?: boolean;
+  }) =>
+    request<OrcaCatalogImportFilamentsResult>('/api/admin/orca-catalog/import-filaments', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   // Admin: Filaments & Profiles
   adminGetFilaments: () => request<Filament[]>('/api/admin/filaments'),
@@ -430,6 +505,11 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
+  adminTestOrcaSlicer: (orcaCliPath: string) =>
+    request<SetupTestOrcaResponse>('/api/admin/settings/test-orcaslicer', {
+      method: 'POST',
+      body: JSON.stringify({ orca_cli_path: orcaCliPath }),
+    }),
   adminGetUpdateStatus: (force = false) =>
     request<SystemUpdateStatus>(
       `/api/admin/system/update-status?force=${force ? 'true' : 'false'}`
@@ -453,13 +533,15 @@ export const api = {
       method: 'POST',
     }),
 
-  // Admin: Permissions & Teachers (Super Admin)
+  // Admin: Account Management & Permissions
   adminGetPermissionCatalog: () => request<PermissionCatalog>('/api/admin/permissions/catalog'),
   adminGetTeachers: () => request<AdminTeacher[]>('/api/admin/teachers'),
   adminCreateTeacher: (data: {
     identifier: string;
     name: string;
     password: string;
+    role?: 'teacher' | 'tech';
+    hierarchy_rank?: number;
     permissions?: string[];
     preset?: string;
   }) =>
@@ -471,6 +553,8 @@ export const api = {
     teacherId: number,
     data: {
       name?: string;
+      role?: 'teacher' | 'tech';
+      hierarchy_rank?: number;
       is_active?: boolean;
       permissions?: string[];
       preset?: string;

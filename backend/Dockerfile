@@ -11,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     ORCA_CLI_PATH=/usr/local/bin/orca-slicer-headless
 
 # System packages:
-# - xvfb + GTK/GL/NSS/X11 libs required by OrcaSlicer AppImage/CLI in headless Linux
+# - xvfb + GTK/GL/WebKitGTK/GStreamer/NSS/Wayland/X11 libs required by OrcaSlicer Ubuntu 24.04 AppImage on Debian Trixie
 # - curl/ca-certificates for healthchecks & OrcaSlicer download
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
@@ -19,9 +19,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     libgl1 \
+    libopengl0 \
     libegl1 \
+    libglx-mesa0 \
     libglib2.0-0 \
     libgtk-3-0 \
+    libwebkit2gtk-4.1-0 \
+    libjavascriptcoregtk-4.1-0 \
+    libgstreamer1.0-0 \
+    libgstreamer-plugins-base1.0-0 \
+    libsecret-1-0 \
+    libcurl4t64 \
+    libwayland-client0 \
+    libwayland-egl1 \
     libnss3 \
     libnspr4 \
     libxkbcommon0 \
@@ -41,8 +51,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---------------------------------------------------------------------------
 # Automatic OrcaSlicer CLI installation (extracted AppImage, no FUSE needed):
 # Downloads the official Linux x86_64 AppImage from SoftFever/OrcaSlicer
-# releases during image build and extracts it to /opt/orcaslicer.
-# Set --build-arg INSTALL_ORCASLICER=false to skip (e.g., if mounting /opt/orcaslicer).
+# releases during image build and extracts it to /opt/orcaslicer-builtin so
+# /opt/orcaslicer remains a clean optional host mount override.
+# Set --build-arg INSTALL_ORCASLICER=false to skip.
 # ---------------------------------------------------------------------------
 RUN if [ "$INSTALL_ORCASLICER" = "true" ] && [ "$(uname -m)" = "x86_64" ]; then \
       ORCASLICER_VERSION="$ORCASLICER_VERSION" python3 -c 'import json, os, sys, urllib.request; \
@@ -61,21 +72,29 @@ print("Downloading OrcaSlicer:", candidates[0]["name"], url); \
 urllib.request.urlretrieve(url, "/tmp/OrcaSlicer.AppImage")' && \
       chmod +x /tmp/OrcaSlicer.AppImage && \
       cd /tmp && /tmp/OrcaSlicer.AppImage --appimage-extract >/dev/null && \
-      rm -rf /opt/orcaslicer && mv /tmp/squashfs-root /opt/orcaslicer && \
+      rm -rf /opt/orcaslicer-builtin && mv /tmp/squashfs-root /opt/orcaslicer-builtin && \
       rm -f /tmp/OrcaSlicer.AppImage && \
-      chmod -R a+rX /opt/orcaslicer; \
-    else \
+      chmod -R a+rX /opt/orcaslicer-builtin && \
       mkdir -p /opt/orcaslicer; \
+    else \
+      mkdir -p /opt/orcaslicer-builtin /opt/orcaslicer; \
     fi
 
 RUN printf '%s\n' \
     '#!/bin/sh' \
+    'if [ -z "${HOME:-}" ] || [ ! -w "$HOME" ]; then' \
+    '  export HOME=/tmp' \
+    'fi' \
     'if [ -x /opt/orcaslicer/AppRun ]; then' \
     '  exec xvfb-run -a -s "-screen 0 1280x1024x24" /opt/orcaslicer/AppRun "$@"' \
     'elif [ -x /opt/orcaslicer/bin/orca-slicer ]; then' \
     '  exec xvfb-run -a -s "-screen 0 1280x1024x24" /opt/orcaslicer/bin/orca-slicer "$@"' \
+    'elif [ -x /opt/orcaslicer-builtin/AppRun ]; then' \
+    '  exec xvfb-run -a -s "-screen 0 1280x1024x24" /opt/orcaslicer-builtin/AppRun "$@"' \
+    'elif [ -x /opt/orcaslicer-builtin/bin/orca-slicer ]; then' \
+    '  exec xvfb-run -a -s "-screen 0 1280x1024x24" /opt/orcaslicer-builtin/bin/orca-slicer "$@"' \
     'else' \
-    '  echo "OrcaSlicer not installed at /opt/orcaslicer" >&2' \
+    '  echo "OrcaSlicer not installed at /opt/orcaslicer or /opt/orcaslicer-builtin" >&2' \
     '  exit 127' \
     'fi' \
     > /usr/local/bin/orca-slicer-headless && chmod +x /usr/local/bin/orca-slicer-headless
@@ -86,7 +105,12 @@ COPY backend/pyproject.toml /app/backend/pyproject.toml
 COPY backend/app /app/backend/app
 COPY sample-models /app/sample-models
 
-# Install backend package + PostgreSQL driver (psycopg2-binary) for Proxmox production
+# Verify baked OrcaSlicer binary & shared libs cleanly at build time
+RUN if [ "$INSTALL_ORCASLICER" = "true" ] && [ "$(uname -m)" = "x86_64" ]; then \
+      /usr/local/bin/orca-slicer-headless --help >/dev/null; \
+    fi
+
+# Install backend package + PostgreSQL driver (psycopg2-binary) and ggprint-cli console script
 RUN pip install --upgrade pip && \
     pip install . psycopg2-binary
 

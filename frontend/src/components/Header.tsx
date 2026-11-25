@@ -54,7 +54,7 @@ export function Header({ activeTab, onSelectTab }: HeaderProps) {
   const hasNotificationsEnabled = Boolean(user.notify_browser || user.notify_webhook_url);
 
   const isStaff = canAccessStaffPortal(user);
-  const staffNavLabel = user.role === 'teacher' ? t.nav.teacherPortal : t.nav.admin;
+  const staffNavLabel = user.role === 'admin' ? t.nav.admin : t.nav.teacherPortal;
   const used = Number(user.active_grams_used ?? 0);
   const max = Number(user.effective_max_active_grams ?? 100);
   const ratio = max > 0 ? Math.min(1, used / max) : 0;
@@ -71,7 +71,9 @@ export function Header({ activeTab, onSelectTab }: HeaderProps) {
       ? t.nav.roleAdmin
       : user.role === 'teacher'
         ? t.nav.roleTeacher
-        : user.da;
+        : user.role === 'tech'
+          ? t.admin.teachers.roleTech
+          : user.da;
 
   const handleSelectTab = (tab: ActiveTab) => {
     onSelectTab(tab);

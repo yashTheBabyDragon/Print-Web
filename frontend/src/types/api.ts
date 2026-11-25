@@ -1,4 +1,4 @@
-export type Role = 'student' | 'teacher' | 'admin';
+export type Role = 'student' | 'teacher' | 'tech' | 'admin';
 export type ApprovalStatus = 'approved' | 'pending' | 'rejected';
 
 export interface TeacherPublic {
@@ -21,6 +21,9 @@ export interface StudentTeacher {
 
 export type JobStatus =
   | 'DRAFT'
+  | 'SLICING_QUEUED'
+  | 'SLICING'
+  | 'SLICE_FAILED'
   | 'SLICED'
   | 'PENDING_APPROVAL'
   | 'QUEUED'
@@ -39,6 +42,7 @@ export interface AuthModeResponse {
   slicer_mode: string;
   fdm_mode: string;
   institution: string;
+  needs_setup?: boolean;
 }
 
 export interface UserSummary {
@@ -46,6 +50,7 @@ export interface UserSummary {
   da: string;
   name: string;
   role: Role;
+  hierarchy_rank?: number;
   permissions?: string[];
   is_active: boolean;
   approval_status?: ApprovalStatus;
@@ -107,6 +112,8 @@ export interface Printer {
   bed_z_mm: number;
   mmu_slots_count: number;
   has_mmu: boolean;
+  is_manual?: boolean;
+  is_fdm_linked?: boolean;
   slots: PrinterSlot[];
 }
 
@@ -170,6 +177,8 @@ export interface JobDetail {
   layer_count?: number | null;
   supports_enabled?: boolean;
   gcode_filename?: string | null;
+  slice_error?: string | null;
+  slice_queue_position?: number | null;
   budget_check?: BudgetCheck | null;
   student_note?: string | null;
   admin_note?: string | null;
@@ -198,6 +207,8 @@ export interface AdminPrinter {
   status: PrinterStatus;
   queue_count: number;
   is_enabled: boolean;
+  is_manual?: boolean;
+  is_fdm_linked?: boolean;
   bed_x_mm: number;
   bed_y_mm: number;
   bed_z_mm: number;
@@ -207,6 +218,125 @@ export interface AdminPrinter {
   process_profile_id: number | null;
   filament_api_printer_id?: string | null;
   slots: PrinterSlot[];
+}
+
+export interface AdminPrinterCreate {
+  display_name: string;
+  printer_type: PrinterType;
+  bed_x_mm: number;
+  bed_y_mm: number;
+  bed_z_mm: number;
+  mmu_slots_count: number;
+  fdm_monster_id?: string | null;
+  filament_api_printer_id?: string | null;
+  machine_profile_id?: number | null;
+  process_profile_id?: number | null;
+  slot_filament_ids?: Array<number | null>;
+  is_enabled?: boolean;
+}
+
+export interface FdmMonsterRemotePrinter {
+  fdm_monster_id: string;
+  name: string;
+  printer_type: PrinterType;
+  status: PrinterStatus;
+  queue_count: number;
+  bed_x_mm: number;
+  bed_y_mm: number;
+  bed_z_mm: number;
+  mmu_slots_count: number;
+}
+
+export interface OrcaCatalogVendorSummary {
+  id: string;
+  name: string;
+  version: string;
+  model_count: number;
+  machine_count: number;
+  process_count: number;
+  filament_count: number;
+  is_library: boolean;
+}
+
+export interface OrcaCatalogModel {
+  id: string;
+  name: string;
+  family: string;
+  manufacturer: string;
+  nozzles: string[];
+  default_materials: string[];
+  cover_url?: string | null;
+  bed_x_mm: number;
+  bed_y_mm: number;
+  bed_z_mm: number;
+  mmu_slots_count: number;
+  printer_type: PrinterType;
+  machine_presets: string[];
+}
+
+export interface OrcaCatalogMachinePreset {
+  name: string;
+  vendor: string;
+  printer_model: string;
+  nozzle_diameter: string;
+  bed_x_mm: number;
+  bed_y_mm: number;
+  bed_z_mm: number;
+  mmu_slots_count: number;
+  printer_type: PrinterType;
+}
+
+export interface OrcaCatalogProcessPreset {
+  name: string;
+  vendor: string;
+  layer_height: string;
+  compatible_printers: string[];
+}
+
+export interface OrcaCatalogFilament {
+  preset_name: string;
+  name: string;
+  vendor: string;
+  material: string;
+  color_hex: string;
+  density_g_cm3: number;
+  compatible_printers: string[];
+}
+
+export interface OrcaCatalogVendorDetail {
+  id: string;
+  name: string;
+  version: string;
+  is_library: boolean;
+  models: OrcaCatalogModel[];
+  machine_presets: OrcaCatalogMachinePreset[];
+  process_presets: OrcaCatalogProcessPreset[];
+  filaments: OrcaCatalogFilament[];
+}
+
+export interface OrcaCatalogImportPrinterPayload {
+  vendor: string;
+  machine_preset_name: string;
+  process_preset_name?: string | null;
+  filament_preset_names?: string[];
+  display_name?: string | null;
+  fdm_monster_id?: string | null;
+  filament_api_printer_id?: string | null;
+  target_printer_id?: number | null;
+  mmu_slots_override?: number | null;
+}
+
+export interface OrcaCatalogImportPrinterResult {
+  printer: AdminPrinter;
+  machine_profile: OrcaProfile;
+  process_profile?: OrcaProfile | null;
+  filaments: Filament[];
+}
+
+export interface OrcaCatalogImportFilamentsResult {
+  filaments: Filament[];
+  created_count: number;
+  updated_count: number;
 }
 
 export interface OrcaProfile {
@@ -343,6 +473,9 @@ export interface AdminTeacher {
   id: number;
   da: string;
   name: string;
+  role?: Role;
+  hierarchy_rank?: number;
+  can_manage?: boolean;
   is_active: boolean;
   permissions?: string[];
   has_custom_permissions?: boolean;
@@ -356,10 +489,14 @@ export interface AdminTeacher {
 export interface PermissionCatalogItem {
   key: string;
   group: string;
+  resource?: string;
+  admin_only?: boolean;
 }
 
 export interface PermissionPreset {
   id: string;
+  role?: string;
+  default_rank?: number;
   permissions: string[];
 }
 
@@ -367,6 +504,7 @@ export interface PermissionCatalog {
   permissions: PermissionCatalogItem[];
   presets: PermissionPreset[];
   role_defaults: Record<Role, string[]>;
+  admin_only_permissions?: string[];
 }
 
 export interface ClassEnrollment {
@@ -457,8 +595,66 @@ export interface SystemSettings {
   fdm_monster_api_key: string;
   slicer_mode: 'mock' | 'orcaslicer';
   orca_cli_path: string;
+  max_concurrent_slices?: number;
   filament_api_enabled: boolean;
   filament_api_url: string;
+}
+
+export interface SetupStatusResponse {
+  needs_setup: boolean;
+  has_admin: boolean;
+  token_valid: boolean;
+  setup_completed: boolean;
+  dev_mode: boolean;
+  institution: string;
+  suggested_orca_path: string;
+  current_settings: {
+    slicer_mode?: 'mock' | 'orcaslicer';
+    orca_cli_path?: string;
+    max_concurrent_slices?: number;
+    fdm_monster_mode?: 'mock' | 'live';
+    fdm_monster_url?: string;
+    has_fdm_monster_api_key?: boolean;
+    default_max_active_grams?: number;
+    default_max_print_minutes?: number;
+    [key: string]: unknown;
+  };
+}
+
+export interface SetupTestOrcaResponse {
+  ok: boolean;
+  path?: string | null;
+  version?: string | null;
+  detail: string;
+}
+
+export interface SetupTestFdmResponse {
+  ok: boolean;
+  printer_count: number;
+  printers: Array<{ id?: string; name?: string; [key: string]: unknown }>;
+  detail: string;
+}
+
+export interface SetupCompletePayload {
+  token?: string | null;
+  admin_username?: string | null;
+  admin_name?: string | null;
+  admin_password?: string | null;
+  institution?: string | null;
+  slicer_mode?: 'mock' | 'orcaslicer' | null;
+  orca_cli_path?: string | null;
+  max_concurrent_slices?: number | null;
+  fdm_monster_mode?: 'mock' | 'live' | null;
+  fdm_monster_url?: string | null;
+  fdm_monster_api_key?: string | null;
+  default_max_active_grams?: number | null;
+  default_max_print_minutes?: number | null;
+}
+
+export interface SliceQueueStats {
+  active_workers: number;
+  queued_count: number;
+  max_workers: number;
 }
 
 export interface UpdateJobStatus {

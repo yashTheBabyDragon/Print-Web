@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
-  GraduationCap,
   Loader2,
   Monitor,
   Palette,
   Printer,
   Settings,
   ShieldCheck,
+  UserCog,
   Users,
 } from 'lucide-react';
 import { api } from '../api/client';
@@ -18,6 +18,7 @@ import type {
   AdminPrinter,
   AdminTeacher,
   ApprovalsResponse,
+  FdmMonsterRemotePrinter,
   Filament,
   FilamentApiPrinter,
   OrcaProfile,
@@ -51,8 +52,15 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
   const { user, authMode } = useAuth();
   const { t } = useI18n();
 
-  const canManagePrinters = hasPermission(user, PERMISSIONS.PRINTERS_MANAGE);
-  const canManageFilaments = hasPermission(user, PERMISSIONS.FILAMENTS_MANAGE);
+  const isMainAdmin = user?.role === 'admin';
+  const canViewPrinters = hasPermission(user, PERMISSIONS.PRINTERS_VIEW);
+  const canManagePrinterSlots = hasPermission(user, PERMISSIONS.PRINTERS_MANAGE_SLOTS);
+  const canEditPrinters = hasPermission(user, PERMISSIONS.PRINTERS_EDIT);
+  const canCreateDeletePrinters = hasPermission(user, PERMISSIONS.PRINTERS_CREATE_DELETE);
+  const canViewFilaments = hasPermission(user, PERMISSIONS.FILAMENTS_VIEW);
+  const canEditFilaments = hasPermission(user, PERMISSIONS.FILAMENTS_EDIT);
+  const canCreateDeleteFilaments = hasPermission(user, PERMISSIONS.FILAMENTS_CREATE_DELETE);
+  const canViewProfiles = hasPermission(user, PERMISSIONS.PROFILES_VIEW);
   const canManageProfiles = hasPermission(user, PERMISSIONS.PROFILES_MANAGE);
   const canManageClasses = hasAnyPermission(user, [
     PERMISSIONS.CLASSES_MANAGE_OWN,
@@ -62,20 +70,28 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
     PERMISSIONS.STUDENTS_MANAGE_OWN,
     PERMISSIONS.STUDENTS_MANAGE_ALL,
   ]);
-  const canManageApprovals = hasAnyPermission(user, [
-    PERMISSIONS.APPROVALS_MANAGE_OWN,
-    PERMISSIONS.APPROVALS_MANAGE_ALL,
+  const canAdjustQuotas = hasPermission(user, PERMISSIONS.STUDENTS_ADJUST_QUOTAS);
+  const canResetStudentPasswords = hasPermission(user, PERMISSIONS.STUDENTS_RESET_PASSWORD);
+  const canApproveJobs = hasAnyPermission(user, [
+    PERMISSIONS.APPROVALS_JOBS_OWN,
+    PERMISSIONS.APPROVALS_JOBS_ALL,
   ]);
-  const canManageTeachers = hasPermission(user, PERMISSIONS.TEACHERS_MANAGE);
-  const canManageSettings = hasPermission(user, PERMISSIONS.SETTINGS_MANAGE);
-  const canManageUpdates = hasPermission(user, PERMISSIONS.UPDATES_MANAGE);
+  const canApproveAccounts = hasAnyPermission(user, [
+    PERMISSIONS.APPROVALS_ACCOUNTS_OWN,
+    PERMISSIONS.APPROVALS_ACCOUNTS_ALL,
+  ]);
+  const canManageApprovals = canApproveJobs || canApproveAccounts;
+  const canViewAccounts = hasPermission(user, PERMISSIONS.ACCOUNTS_VIEW);
+  const canManageSettings = isMainAdmin;
+  const canManageUpdates = isMainAdmin;
   const canManageAllClasses = hasPermission(user, PERMISSIONS.CLASSES_MANAGE_ALL);
-  const canManageAllApprovals = hasPermission(user, PERMISSIONS.APPROVALS_MANAGE_ALL);
+  const canManageAllApprovals = hasPermission(user, PERMISSIONS.APPROVALS_JOBS_ALL);
+  const canManageAllAccountReqs = hasPermission(user, PERMISSIONS.APPROVALS_ACCOUNTS_ALL);
 
-  const isTeacherPortal = !canManagePrinters && !canManageSettings && !canManageTeachers;
+  const isTeacherPortal = !isMainAdmin;
 
   const [tab, setTab] = useState<AdminTabId>(() =>
-    canManagePrinters ? 'printers' : 'students'
+    canViewPrinters || canViewProfiles ? 'printers' : 'students'
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -93,27 +109,35 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
   });
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [filamentApiPrinters, setFilamentApiPrinters] = useState<FilamentApiPrinter[]>([]);
+  const [remoteFdmPrinters, setRemoteFdmPrinters] = useState<FdmMonsterRemotePrinter[]>([]);
 
   const reloadAll = useCallback(async () => {
     setError(null);
     try {
-      const [p, f, pr, cl, st, ap, ar, te, se, fap] = await Promise.all([
-        canManagePrinters ? api.adminGetPrinters() : Promise.resolve<AdminPrinter[]>([]),
-        canManageFilaments ? api.adminGetFilaments() : Promise.resolve<Filament[]>([]),
-        canManageProfiles ? api.adminGetProfiles() : Promise.resolve<OrcaProfile[]>([]),
+      const [p, f, pr, cl, st, ap, ar, te, se, fap, rfp] = await Promise.all([
+        canViewPrinters ? api.adminGetPrinters() : Promise.resolve<AdminPrinter[]>([]),
+        canViewFilaments || canViewPrinters
+          ? api.adminGetFilaments()
+          : Promise.resolve<Filament[]>([]),
+        canViewProfiles || canEditPrinters || canEditFilaments
+          ? api.adminGetProfiles()
+          : Promise.resolve<OrcaProfile[]>([]),
         canManageClasses ? api.adminGetClasses() : Promise.resolve<TeacherClass[]>([]),
         canManageStudents ? api.adminGetStudents() : Promise.resolve<StudentAccount[]>([]),
-        canManageApprovals
+        canApproveJobs
           ? api.adminGetApprovals()
           : Promise.resolve<ApprovalsResponse>({ pending: [], history: [] }),
-        canManageStudents
+        canApproveAccounts
           ? api.adminGetAccountRequests()
           : Promise.resolve<PendingAccountRequest[]>([]),
-        canManageTeachers ? api.adminGetTeachers() : Promise.resolve<AdminTeacher[]>([]),
+        canViewAccounts ? api.adminGetTeachers() : Promise.resolve<AdminTeacher[]>([]),
         canManageSettings ? api.adminGetSettings() : Promise.resolve<SystemSettings | null>(null),
-        canManagePrinters
+        canViewPrinters
           ? api.adminGetFilamentApiPrinters().catch(() => [] as FilamentApiPrinter[])
           : Promise.resolve<FilamentApiPrinter[]>([]),
+        canCreateDeletePrinters || canEditPrinters
+          ? api.adminGetFdmMonsterPrinters().catch(() => [] as FdmMonsterRemotePrinter[])
+          : Promise.resolve<FdmMonsterRemotePrinter[]>([]),
       ]);
       setPrinters(p);
       setFilaments(f);
@@ -125,19 +149,24 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
       setTeachers(te);
       setSettings(se);
       setFilamentApiPrinters(fap);
+      setRemoteFdmPrinters(rfp);
     } catch (err) {
       setError(translateApiError(err, t));
     } finally {
       setLoading(false);
     }
   }, [
-    canManagePrinters,
-    canManageFilaments,
-    canManageProfiles,
+    canViewPrinters,
+    canViewFilaments,
+    canEditFilaments,
+    canEditPrinters,
+    canCreateDeletePrinters,
+    canViewProfiles,
     canManageClasses,
     canManageStudents,
-    canManageApprovals,
-    canManageTeachers,
+    canApproveJobs,
+    canApproveAccounts,
+    canViewAccounts,
     canManageSettings,
     t,
   ]);
@@ -148,49 +177,61 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
 
   const pendingApprovalsCount = approvals.pending.length + accountRequests.length;
 
-  const tabs = useMemo(() => {
-    const list: Array<{ id: AdminTabId; label: string; icon: typeof Printer; badge?: number }> = [];
-    if (canManagePrinters) {
-      list.push({ id: 'printers', label: t.admin.tabs.printers, icon: Printer });
+  const navGroups = useMemo(() => {
+    type NavItem = { id: AdminTabId; label: string; icon: typeof Printer; badge?: number };
+    const labItems: NavItem[] = [];
+    if (canViewPrinters || canViewProfiles) {
+      labItems.push({ id: 'printers', label: t.admin.tabs.printers, icon: Printer });
     }
-    if (canManageFilaments || canManageProfiles) {
-      list.push({ id: 'filaments', label: t.admin.tabs.filaments, icon: Palette });
+    if (canViewFilaments) {
+      labItems.push({ id: 'filaments', label: t.admin.tabs.filaments, icon: Palette });
     }
-    if (canManageClasses || canManageStudents) {
-      list.push({ id: 'students', label: t.admin.tabs.students, icon: Users });
-    }
+
+    const peopleItems: NavItem[] = [];
     if (canManageApprovals) {
-      list.push({
+      peopleItems.push({
         id: 'approvals',
         label: t.admin.tabs.approvals,
         icon: ShieldCheck,
         badge: pendingApprovalsCount,
       });
     }
-    if (canManageTeachers) {
-      list.push({ id: 'teachers', label: t.admin.tabs.teachers, icon: GraduationCap });
+    if (canManageClasses || canManageStudents) {
+      peopleItems.push({ id: 'students', label: t.admin.tabs.students, icon: Users });
     }
+    if (canViewAccounts) {
+      peopleItems.push({ id: 'teachers', label: t.admin.tabs.teachers, icon: UserCog });
+    }
+
+    const systemItems: NavItem[] = [];
     if (canManageSettings || canManageUpdates) {
-      list.push({
+      systemItems.push({
         id: 'settings',
-        label: canManageSettings ? t.admin.tabs.settings : t.admin.settings.updatesTabLabel,
+        label: t.admin.tabs.settings,
         icon: Settings,
       });
     }
-    return list;
+
+    return [
+      { id: 'lab', label: t.admin.groups.lab, items: labItems },
+      { id: 'people', label: t.admin.groups.people, items: peopleItems },
+      { id: 'system', label: t.admin.groups.system, items: systemItems },
+    ].filter((g) => g.items.length > 0);
   }, [
-    canManagePrinters,
-    canManageFilaments,
-    canManageProfiles,
+    canViewPrinters,
+    canViewFilaments,
+    canViewProfiles,
     canManageClasses,
     canManageStudents,
     canManageApprovals,
-    canManageTeachers,
+    canViewAccounts,
     canManageSettings,
     canManageUpdates,
     pendingApprovalsCount,
     t,
   ]);
+
+  const tabs = useMemo(() => navGroups.flatMap((g) => g.items), [navGroups]);
 
   const effectiveTab: AdminTabId = tabs.some((item) => item.id === tab)
     ? tab
@@ -245,38 +286,45 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
           {/* Left Rail (collapses to horizontal strip on tablet) */}
           <nav
             aria-label={headerTitle}
-            className="flex shrink-0 gap-1 overflow-x-auto pb-1 lg:w-56 lg:flex-col lg:pb-0"
+            className="flex shrink-0 gap-3 overflow-x-auto pb-1 lg:w-60 lg:flex-col lg:gap-4 lg:pb-0"
           >
-            {tabs.map((item) => {
-              const Icon = item.icon;
-              const active = effectiveTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setTab(item.id)}
-                  className={`flex shrink-0 items-center justify-between gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium transition-colors ${
-                    active
-                      ? 'bg-white text-[#111318] shadow-sm ring-1 ring-black/[0.06] dark:bg-[#1D2027] dark:text-white dark:ring-white/[0.08]'
-                      : 'text-[#5B616E] hover:bg-black/[0.04] hover:text-[#111318] dark:text-[#9399A6] dark:hover:bg-white/[0.05] dark:hover:text-[#F4F5F7]'
-                  }`}
-                >
-                  <span className="flex items-center gap-2.5">
-                    <Icon
-                      className={`h-4 w-4 ${
-                        active ? 'text-[#00A7D9]' : 'text-[#8A909E] dark:text-[#6B717D]'
+            {navGroups.map((group) => (
+              <div key={group.id} className="flex shrink-0 items-center gap-1 lg:flex-col lg:items-stretch">
+                <div className="hidden px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[#8A909E] dark:text-[#6B717D] lg:block">
+                  {group.label}
+                </div>
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  const active = effectiveTab === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setTab(item.id)}
+                      className={`flex shrink-0 items-center justify-between gap-2.5 rounded-xl px-3 py-2 text-[13px] font-medium transition-colors ${
+                        active
+                          ? 'bg-white text-[#111318] shadow-sm ring-1 ring-black/[0.06] dark:bg-[#1D2027] dark:text-white dark:ring-white/[0.08]'
+                          : 'text-[#5B616E] hover:bg-black/[0.04] hover:text-[#111318] dark:text-[#9399A6] dark:hover:bg-white/[0.05] dark:hover:text-[#F4F5F7]'
                       }`}
-                    />
-                    <span>{item.label}</span>
-                  </span>
-                  {item.badge != null && item.badge > 0 && (
-                    <span className="rounded-full bg-amber-500 px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums text-slate-950">
-                      {item.badge}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <Icon
+                          className={`h-4 w-4 ${
+                            active ? 'text-[#00A7D9]' : 'text-[#8A909E] dark:text-[#6B717D]'
+                          }`}
+                        />
+                        <span>{item.label}</span>
+                      </span>
+                      {item.badge != null && item.badge > 0 && (
+                        <span className="rounded-full bg-amber-500 px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums text-slate-950">
+                          {item.badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
           </nav>
 
           {/* Main Panel */}
@@ -304,21 +352,29 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
               </div>
             ) : (
               <>
-                {effectiveTab === 'printers' && canManagePrinters && (
+                {effectiveTab === 'printers' && (canViewPrinters || canViewProfiles) && (
                   <AdminPrintersTab
                     printers={printers}
                     filaments={filaments}
                     profiles={profiles}
+                    canManagePrinters={canViewPrinters}
+                    canManageSlots={canManagePrinterSlots}
+                    canEditPrinters={canEditPrinters}
+                    canCreateDeletePrinters={canCreateDeletePrinters}
+                    canManageProfiles={canManageProfiles}
                     filamentApiEnabled={settings?.filament_api_enabled ?? filamentApiPrinters.length > 0}
                     filamentApiPrinters={filamentApiPrinters}
+                    remoteFdmPrinters={remoteFdmPrinters}
                     onReload={reloadAll}
                     onError={setError}
                   />
                 )}
-                {effectiveTab === 'filaments' && (canManageFilaments || canManageProfiles) && (
+                {effectiveTab === 'filaments' && canViewFilaments && (
                   <AdminFilamentsProfilesTab
                     filaments={filaments}
                     profiles={profiles}
+                    canEditFilaments={canEditFilaments}
+                    canCreateDeleteFilaments={canCreateDeleteFilaments}
                     onReload={reloadAll}
                     onError={setError}
                   />
@@ -330,6 +386,9 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
                     students={students}
                     accountRequests={accountRequests}
                     isSuperAdmin={canManageAllClasses}
+                    canAdjustQuotas={canAdjustQuotas}
+                    canResetPasswords={canResetStudentPasswords}
+                    onOpenApprovals={canManageApprovals ? () => setTab('approvals') : undefined}
                     onReload={reloadAll}
                     onError={setError}
                   />
@@ -339,14 +398,18 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
                     approvals={approvals}
                     accountRequests={accountRequests}
                     classes={classes}
-                    isSuperAdmin={canManageAllApprovals}
+                    isSuperAdmin={canManageAllApprovals || canManageAllAccountReqs}
+                    canApproveJobs={canApproveJobs}
+                    canApproveAccounts={canApproveAccounts}
+                    canAdjustQuotas={canAdjustQuotas}
                     onReload={reloadAll}
                     onError={setError}
                   />
                 )}
-                {effectiveTab === 'teachers' && canManageTeachers && (
+                {effectiveTab === 'teachers' && canViewAccounts && (
                   <AdminTeachersTab
                     teachers={teachers}
+                    currentUser={user}
                     onReload={reloadAll}
                     onError={setError}
                   />

@@ -24,6 +24,7 @@ from app.schemas import (
     WebhookTestRequest,
     WebhookTestResponse,
 )
+from app.routers.setup import has_any_admin
 from app.services.budget import build_user_summary, get_system_settings
 from app.services.drafts import delete_user_drafts
 from app.services.notifications import (
@@ -37,15 +38,17 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.get("/mode", response_model=AuthModeOut)
 def get_auth_mode(db: Session = Depends(get_db)) -> AuthModeOut:
-    """Public endpoint informing the login page of dev mode and integration modes."""
+    """Public endpoint informing the login page of dev mode, setup state, and integration modes."""
     sys_settings = get_system_settings(db)
     slicer_mode = sys_settings.slicer_mode if settings.dev_seed else "orcaslicer"
     fdm_mode = sys_settings.fdm_monster_mode if settings.dev_seed else "live"
+    needs_setup = not settings.dev_seed and not has_any_admin(db)
     return AuthModeOut(
         dev_mode=settings.dev_seed,
         slicer_mode=slicer_mode,
         fdm_mode=fdm_mode,
         institution=settings.institution,
+        needs_setup=needs_setup,
     )
 
 

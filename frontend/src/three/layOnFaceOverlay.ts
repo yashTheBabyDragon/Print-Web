@@ -35,7 +35,8 @@ const CORNER_ROUND_AGGRESSIVITY = 0.2; // aggressivity = 0.2f
 const OUTLINE_SHRINK_KEEP = 0.9; // 0.9f * vertex + 0.1f * centroid
 const SURFACE_LIFT_MM = 0.1; // b(2) += 0.1f
 
-const MAX_HULL_INPUT_POINTS = 50000;
+const MAX_HULL_INPUT_POINTS = 10000;
+const MAX_PRE_DEDUP_SAMPLE = 40000;
 
 const IDLE_COLOR = 0xf8fafc;
 const IDLE_OPACITY = 0.72;
@@ -326,17 +327,27 @@ export class LayOnFaceOverlay {
       return;
     }
 
+    // Compute raw bounds using scalar reads first so huge STLs never allocate millions of Vector3s
     const rawBox = new THREE.Box3();
-    const rawPoints: THREE.Vector3[] = new Array(posAttr.count);
+    let minX = Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let maxZ = -Infinity;
     for (let i = 0; i < posAttr.count; i++) {
-      const p = new THREE.Vector3(
-        posAttr.getX(i) + localOffset.x,
-        posAttr.getY(i) + localOffset.y,
-        posAttr.getZ(i) + localOffset.z
-      );
-      rawPoints[i] = p;
-      rawBox.expandByPoint(p);
+      const x = posAttr.getX(i) + localOffset.x;
+      const y = posAttr.getY(i) + localOffset.y;
+      const z = posAttr.getZ(i) + localOffset.z;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
     }
+    rawBox.min.set(minX, minY, minZ);
+    rawBox.max.set(maxX, maxY, maxZ);
 
     const size = new THREE.Vector3();
     rawBox.getSize(size);
@@ -345,9 +356,27 @@ export class LayOnFaceOverlay {
       return;
     }
 
+    let wasStrided = false;
+    const preStride =
+      posAttr.count > MAX_PRE_DEDUP_SAMPLE
+        ? Math.ceil(posAttr.count / MAX_PRE_DEDUP_SAMPLE)
+        : 1;
+    if (preStride > 1) {
+      wasStrided = true;
+    }
+    const rawPoints: THREE.Vector3[] = [];
+    for (let i = 0; i < posAttr.count; i += preStride) {
+      rawPoints.push(
+        new THREE.Vector3(
+          posAttr.getX(i) + localOffset.x,
+          posAttr.getY(i) + localOffset.y,
+          posAttr.getZ(i) + localOffset.z
+        )
+      );
+    }
+
     const quantStep = Math.max(1e-4, Math.min(0.01, diag * 1e-4));
     let uniquePoints = deduplicatePoints(rawPoints, quantStep);
-    let wasStrided = false;
 
     if (uniquePoints.length > MAX_HULL_INPUT_POINTS) {
       const coarser = deduplicatePoints(uniquePoints, Math.max(quantStep, diag * 5e-4));

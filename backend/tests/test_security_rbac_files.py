@@ -94,7 +94,7 @@ def _upload_and_slice_job(client: TestClient, token: str, filename: str = "cube.
     job = up.json()
 
     sl = client.post(
-        f"/api/jobs/{job['id']}/slice",
+        f"/api/jobs/{job['id']}/slice?sync=true",
         headers=_auth(token),
         json={"printer_id": printer_id, "slot_id": slot_id},
     )
@@ -110,7 +110,7 @@ def _upload_and_slice_job(client: TestClient, token: str, filename: str = "cube.
 def test_teacher_delegation_ceiling_and_self_escalation_blocked(client: TestClient):
     a_tok = _login(client, "admin", "admin123")["access_token"]
 
-    # Admin creates a delegated teacher with ONLY teachers:manage + slicer:use
+    # Admin creates a delegated teacher with account management permissions + slicer:use at rank 60
     r_del = client.post(
         "/api/admin/teachers",
         headers=_auth(a_tok),
@@ -118,13 +118,23 @@ def test_teacher_delegation_ceiling_and_self_escalation_blocked(client: TestClie
             "identifier": "delegated@cgodin.qc.ca",
             "name": "Delegated Teacher",
             "password": "password123",
-            "permissions": [Permission.TEACHERS_MANAGE.value, Permission.SLICER_USE.value],
+            "role": "teacher",
+            "hierarchy_rank": 60,
+            "permissions": [
+                Permission.ACCOUNTS_VIEW.value,
+                Permission.ACCOUNTS_CREATE_TECH.value,
+                Permission.ACCOUNTS_CREATE_TEACHER.value,
+                Permission.ACCOUNTS_EDIT_PERMISSIONS.value,
+                Permission.ACCOUNTS_MANAGE_STATUS.value,
+                Permission.ACCOUNTS_DELETE.value,
+                Permission.SLICER_USE.value,
+            ],
         },
     )
     assert r_del.status_code == 201, r_del.text
     delegated_id = r_del.json()["id"]
 
-    # Admin creates a higher-privileged teacher (settings:manage)
+    # Admin creates a higher-privileged teacher (printers:create_delete, rank 75)
     r_hi = client.post(
         "/api/admin/teachers",
         headers=_auth(a_tok),
@@ -132,7 +142,9 @@ def test_teacher_delegation_ceiling_and_self_escalation_blocked(client: TestClie
             "identifier": "highpriv@cgodin.qc.ca",
             "name": "High Priv Teacher",
             "password": "password123",
-            "permissions": [Permission.SETTINGS_MANAGE.value, Permission.SLICER_USE.value],
+            "role": "teacher",
+            "hierarchy_rank": 75,
+            "permissions": [Permission.PRINTERS_CREATE_DELETE.value, Permission.SLICER_USE.value],
         },
     )
     assert r_hi.status_code == 201, r_hi.text
@@ -140,20 +152,23 @@ def test_teacher_delegation_ceiling_and_self_escalation_blocked(client: TestClie
 
     d_tok = _login(client, "delegated@cgodin.qc.ca", "password123")["access_token"]
 
-    # 1) Cannot create a teacher with permissions caller does not hold (manual list)
-    r_esc_create = client.post(
-        "/api/admin/teachers",
-        headers=_auth(d_tok),
-        json={
-            "identifier": "esc1@cgodin.qc.ca",
-            "name": "Esc 1",
-            "password": "password123",
-            "permissions": [Permission.SETTINGS_MANAGE.value],
-        },
-    )
-    assert r_esc_create.status_code == 403
+    # 1) Cannot create a staff account with permissions caller does not hold (admin-only OR unheld printer perm)
+    for perm_key in (Permission.SETTINGS_MANAGE.value, Permission.PRINTERS_EDIT.value):
+        r_esc_create = client.post(
+            "/api/admin/teachers",
+            headers=_auth(d_tok),
+            json={
+                "identifier": "esc1@cgodin.qc.ca",
+                "name": "Esc 1",
+                "password": "password123",
+                "role": "tech",
+                "hierarchy_rank": 40,
+                "permissions": [perm_key],
+            },
+        )
+        assert r_esc_create.status_code == 403
 
-    # 2) Cannot create a teacher with a preset containing permissions caller does not hold
+    # 2) Cannot create an account with a preset containing unheld permissions
     r_esc_preset = client.post(
         "/api/admin/teachers",
         headers=_auth(d_tok),
@@ -161,12 +176,12 @@ def test_teacher_delegation_ceiling_and_self_escalation_blocked(client: TestClie
             "identifier": "esc2@cgodin.qc.ca",
             "name": "Esc 2",
             "password": "password123",
-            "preset": "full_admin",
+            "preset": "lab_tech",
         },
     )
     assert r_esc_preset.status_code == 403
 
-    # 3) Can create a teacher with a subset of caller's permissions
+    # 3) Can create a junior teacher/tech with subset of caller's permissions and rank <= 60
     r_ok_create = client.post(
         "/api/admin/teachers",
         headers=_auth(d_tok),
@@ -174,6 +189,8 @@ def test_teacher_delegation_ceiling_and_self_escalation_blocked(client: TestClie
             "identifier": "junior@cgodin.qc.ca",
             "name": "Junior Teacher",
             "password": "password123",
+            "role": "teacher",
+            "hierarchy_rank": 40,
             "permissions": [Permission.SLICER_USE.value],
         },
     )
@@ -197,7 +214,7 @@ def test_teacher_delegation_ceiling_and_self_escalation_blocked(client: TestClie
     r_patch_esc = client.patch(
         f"/api/admin/teachers/{junior_id}",
         headers=_auth(d_tok),
-        json={"permissions": [Permission.SLICER_USE.value, Permission.PRINTERS_MANAGE.value]},
+        json={"permissions": [Permission.SLICER_USE.value, Permission.PRINTERS_CREATE_DELETE.value]},
     )
     assert r_patch_esc.status_code == 403
 
@@ -278,7 +295,7 @@ def test_approve_and_raise_requires_student_management_permission(client: TestCl
     a_tok = _login(client, "admin", "admin123")["access_token"]
     s_tok = _login(client, "2345678", "student123")["access_token"]
 
-    # Create a lab_tech teacher (has approvals:manage_all, NO students:manage_*)
+    # Create a printer operator (has approvals:jobs_all, NO students:manage_* / students:adjust_quotas)
     r_lt = client.post(
         "/api/admin/teachers",
         headers=_auth(a_tok),
@@ -286,13 +303,13 @@ def test_approve_and_raise_requires_student_management_permission(client: TestCl
             "identifier": "labtech.sec@cgodin.qc.ca",
             "name": "Lab Tech Sec",
             "password": "password123",
-            "preset": "lab_tech",
+            "preset": "printer_operator",
         },
     )
     assert r_lt.status_code == 201
     lt_tok = _login(client, "labtech.sec@cgodin.qc.ca", "password123")["access_token"]
 
-    # Create a teacher with approvals:manage_all + students:manage_own (not enrolled with student 2345678)
+    # Create a teacher with approvals:jobs_all + students:manage_own + students:adjust_quotas (not enrolled with student 2345678)
     r_t2 = client.post(
         "/api/admin/teachers",
         headers=_auth(a_tok),
@@ -301,8 +318,9 @@ def test_approve_and_raise_requires_student_management_permission(client: TestCl
             "name": "Other Approver",
             "password": "password123",
             "permissions": [
-                Permission.APPROVALS_MANAGE_ALL.value,
+                Permission.APPROVALS_JOBS_ALL.value,
                 Permission.STUDENTS_MANAGE_OWN.value,
+                Permission.STUDENTS_ADJUST_QUOTAS.value,
             ],
         },
     )
@@ -763,3 +781,253 @@ def test_path_sanitization_and_containment(client: TestClient, tmp_path: Path):
         delete_job_with_files(db, job_row, commit=True)
 
     assert outside_job_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# 6. Discord Hierarchy, Admin-Only Settings Lock & Granular Printer/Filament Scopes
+# ---------------------------------------------------------------------------
+
+
+def test_settings_and_updates_strictly_admin_only_even_with_custom_json(client: TestClient):
+    a_tok = _login(client, "admin", "admin123")["access_token"]
+    r_create = client.post(
+        "/api/admin/accounts",
+        headers=_auth(a_tok),
+        json={
+            "identifier": "tech.lock@cgodin.qc.ca",
+            "name": "Tech Lock",
+            "password": "password123",
+            "role": "tech",
+            "hierarchy_rank": 90,
+            "preset": "lab_tech",
+        },
+    )
+    assert r_create.status_code == 201, r_create.text
+    tech_id = r_create.json()["id"]
+
+    # Attempting to assign settings:manage or updates:manage is rejected with 403 ADMIN_ONLY_PERMISSION
+    for admin_perm in (Permission.SETTINGS_MANAGE.value, Permission.UPDATES_MANAGE.value):
+        resp = client.patch(
+            f"/api/admin/accounts/{tech_id}",
+            headers=_auth(a_tok),
+            json={"permissions": [Permission.SLICER_USE.value, admin_perm]},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == "ADMIN_ONLY_PERMISSION"
+
+    # Even if DB permissions_json were forcibly polluted, runtime strips admin-only permissions and rejects
+    with database.SessionLocal() as db:
+        u = db.get(User, tech_id)
+        assert u is not None
+        u.permissions_json = json.dumps(["settings:manage", "updates:manage", "printers:view"])
+        db.commit()
+
+    t_login = _login(client, "tech.lock@cgodin.qc.ca", "password123")
+    t_tok = t_login["access_token"]
+    assert "settings:manage" not in t_login["user"]["permissions"]
+    assert "updates:manage" not in t_login["user"]["permissions"]
+    assert client.get("/api/admin/settings", headers=_auth(t_tok)).status_code == 403
+    assert client.patch(
+        "/api/admin/settings", headers=_auth(t_tok), json={"default_max_active_grams": 999.0}
+    ).status_code == 403
+    assert client.get("/api/admin/system/update-status", headers=_auth(t_tok)).status_code == 403
+
+
+def test_discord_hierarchy_rank_and_create_tech_vs_teacher_delegation(client: TestClient):
+    a_tok = _login(client, "admin", "admin123")["access_token"]
+    admin_row = next(u for u in client.get("/api/admin/accounts", headers=_auth(a_tok)).json() if u["role"] == "admin")
+    assert admin_row["hierarchy_rank"] == 100
+    assert admin_row["can_manage"] is False  # Protected even in listing
+
+    # Admin creates Lead Teacher (rank 70) who can ONLY create Lab Techs (NOT Teachers) + edit/view printers
+    r_lead = client.post(
+        "/api/admin/accounts",
+        headers=_auth(a_tok),
+        json={
+            "identifier": "lead.coord@cgodin.qc.ca",
+            "name": "Lead Coord",
+            "password": "password123",
+            "role": "teacher",
+            "hierarchy_rank": 70,
+            "permissions": [
+                Permission.SLICER_USE.value,
+                Permission.ACCOUNTS_VIEW.value,
+                Permission.ACCOUNTS_CREATE_TECH.value,
+                Permission.ACCOUNTS_EDIT_PERMISSIONS.value,
+                Permission.ACCOUNTS_MANAGE_STATUS.value,
+                Permission.PRINTERS_VIEW.value,
+                Permission.PRINTERS_MANAGE_SLOTS.value,
+            ],
+        },
+    )
+    assert r_lead.status_code == 201, r_lead.text
+    lead_tok = _login(client, "lead.coord@cgodin.qc.ca", "password123")["access_token"]
+
+    # Lead CAN create a Lab Tech at rank 50 with subset permissions
+    r_tech = client.post(
+        "/api/admin/accounts",
+        headers=_auth(lead_tok),
+        json={
+            "identifier": "sub.tech@cgodin.qc.ca",
+            "name": "Sub Tech",
+            "password": "password123",
+            "role": "tech",
+            "hierarchy_rank": 50,
+            "permissions": [Permission.SLICER_USE.value, Permission.PRINTERS_MANAGE_SLOTS.value],
+        },
+    )
+    assert r_tech.status_code == 201, r_tech.text
+    sub_tech_id = r_tech.json()["id"]
+
+    # Lead CANNOT create a Teacher (lacks accounts:create_teacher)
+    r_no_teacher = client.post(
+        "/api/admin/accounts",
+        headers=_auth(lead_tok),
+        json={
+            "identifier": "sub.teacher@cgodin.qc.ca",
+            "name": "Sub Teacher",
+            "password": "password123",
+            "role": "teacher",
+            "hierarchy_rank": 40,
+            "permissions": [Permission.SLICER_USE.value],
+        },
+    )
+    assert r_no_teacher.status_code == 403
+
+    # Lead CANNOT create a Lab Tech at rank 75 (> Lead's rank 70)
+    r_rank_esc = client.post(
+        "/api/admin/accounts",
+        headers=_auth(lead_tok),
+        json={
+            "identifier": "high.tech@cgodin.qc.ca",
+            "name": "High Tech",
+            "password": "password123",
+            "role": "tech",
+            "hierarchy_rank": 75,
+            "permissions": [Permission.SLICER_USE.value],
+        },
+    )
+    assert r_rank_esc.status_code == 403
+    assert r_rank_esc.json()["detail"]["code"] == "RANK_EXCEEDED"
+
+    # Lead CANNOT modify or delete Super Admin -> 403 ADMIN_PROTECTED
+    assert (
+        client.patch(
+            f"/api/admin/accounts/{admin_row['id']}",
+            headers=_auth(lead_tok),
+            json={"is_active": False},
+        ).status_code
+        == 403
+    )
+
+    # Lead CAN edit Sub Tech's status/permissions within Lead's ceiling
+    r_patch_tech = client.patch(
+        f"/api/admin/accounts/{sub_tech_id}",
+        headers=_auth(lead_tok),
+        json={"is_active": False},
+    )
+    assert r_patch_tech.status_code == 200
+    assert r_patch_tech.json()["is_active"] is False
+
+    # Lead CANNOT delete Sub Tech (lacks accounts:delete) -> 403
+    assert client.delete(f"/api/admin/accounts/{sub_tech_id}", headers=_auth(lead_tok)).status_code == 403
+
+
+def test_granular_printer_filament_and_student_scopes(client: TestClient):
+    a_tok = _login(client, "admin", "admin123")["access_token"]
+    printers = client.get("/api/admin/printers", headers=_auth(a_tok)).json()
+    filaments = client.get("/api/admin/filaments", headers=_auth(a_tok)).json()
+    printer_id = printers[0]["id"]
+    filament_id = filaments[0]["id"]
+
+    # 1. Slots-only operator: CAN view printers & update slots, CANNOT edit/add/delete printers
+    r_op = client.post(
+        "/api/admin/accounts",
+        headers=_auth(a_tok),
+        json={
+            "identifier": "slot.op@cgodin.qc.ca",
+            "name": "Slot Op",
+            "password": "password123",
+            "role": "tech",
+            "permissions": [Permission.PRINTERS_MANAGE_SLOTS.value, Permission.FILAMENTS_EDIT.value],
+        },
+    )
+    assert r_op.status_code == 201
+    op_tok = _login(client, "slot.op@cgodin.qc.ca", "password123")["access_token"]
+
+    assert client.get("/api/admin/printers", headers=_auth(op_tok)).status_code == 200
+    assert (
+        client.put(
+            f"/api/admin/printers/{printer_id}/slots/1",
+            headers=_auth(op_tok),
+            json={"filament_id": filament_id, "is_loaded": True},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.patch(
+            f"/api/admin/printers/{printer_id}",
+            headers=_auth(op_tok),
+            json={"display_name": "Denied Edit"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/api/admin/printers",
+            headers=_auth(op_tok),
+            json={
+                "display_name": "Denied Create",
+                "printer_type": "klipper",
+                "bed_x_mm": 200,
+                "bed_y_mm": 200,
+                "bed_z_mm": 200,
+                "mmu_slots_count": 1,
+            },
+        ).status_code
+        == 403
+    )
+
+    # Same operator has filaments:edit ONLY: CAN patch filament, CANNOT create or delete
+    assert (
+        client.patch(
+            f"/api/admin/filaments/{filament_id}",
+            headers=_auth(op_tok),
+            json={"color_hex": "#112233"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/admin/filaments",
+            headers=_auth(op_tok),
+            json={"name": "Blocked PLA", "material": "PLA"},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.delete(f"/api/admin/filaments/{filament_id}", headers=_auth(op_tok)).status_code
+        == 403
+    )
+
+    # 2. Full Lab Tech default role sees all classes, students, approvals, printers, filaments, profiles, but NOT settings
+    r_full_tech = client.post(
+        "/api/admin/accounts",
+        headers=_auth(a_tok),
+        json={
+            "identifier": "full.tech@cgodin.qc.ca",
+            "name": "Full Lab Tech",
+            "password": "password123",
+            "role": "tech",
+        },
+    )
+    assert r_full_tech.status_code == 201
+    ft_tok = _login(client, "full.tech@cgodin.qc.ca", "password123")["access_token"]
+    assert len(client.get("/api/admin/classes", headers=_auth(ft_tok)).json()) >= 2
+    assert client.get("/api/admin/students", headers=_auth(ft_tok)).status_code == 200
+    assert client.get("/api/admin/approvals", headers=_auth(ft_tok)).status_code == 200
+    assert client.get("/api/admin/printers", headers=_auth(ft_tok)).status_code == 200
+    assert client.get("/api/admin/filaments", headers=_auth(ft_tok)).status_code == 200
+    assert client.get("/api/admin/profiles", headers=_auth(ft_tok)).status_code == 200
+    assert client.get("/api/admin/settings", headers=_auth(ft_tok)).status_code == 403
+

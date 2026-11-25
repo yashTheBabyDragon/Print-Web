@@ -15,6 +15,7 @@ class AuthModeOut(BaseModel):
     slicer_mode: str
     fdm_mode: str
     institution: str
+    needs_setup: bool = False
 
 
 class TeacherPublicOut(BaseModel):
@@ -39,7 +40,8 @@ class UserSummary(BaseModel):
     id: int
     da: str
     name: str
-    role: Literal["student", "teacher", "admin"]
+    role: Literal["student", "teacher", "tech", "admin"]
+    hierarchy_rank: int = 0
     permissions: list[str] = Field(default_factory=list)
     approval_status: Literal["approved", "pending", "rejected"] = "approved"
     teachers: list[StudentTeacherOut] = Field(default_factory=list)
@@ -157,6 +159,8 @@ class PrinterOut(BaseModel):
     bed_z_mm: float
     mmu_slots_count: int
     has_mmu: bool
+    is_manual: bool = False
+    is_fdm_linked: bool = True
     slots: list[PrinterSlotOut]
 
 
@@ -168,9 +172,26 @@ class AdminPrinterOut(PrinterOut):
     filament_api_printer_id: Optional[str] = None
 
 
+class AdminPrinterCreate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=150)
+    printer_type: Literal["prusalink", "klipper"] = "prusalink"
+    bed_x_mm: float = Field(default=250.0, gt=20.0, le=1000.0)
+    bed_y_mm: float = Field(default=210.0, gt=20.0, le=1000.0)
+    bed_z_mm: float = Field(default=220.0, gt=20.0, le=1000.0)
+    mmu_slots_count: int = Field(default=1, ge=1, le=16)
+    fdm_monster_id: Optional[str] = Field(default=None, max_length=120)
+    filament_api_printer_id: Optional[str] = Field(default=None, max_length=120)
+    machine_profile_id: Optional[int] = None
+    process_profile_id: Optional[int] = None
+    slot_filament_ids: list[Optional[int]] = Field(default_factory=list)
+    is_enabled: bool = True
+
+
 class AdminPrinterPatch(BaseModel):
     is_enabled: Optional[bool] = None
     display_name: Optional[str] = Field(default=None, min_length=1, max_length=150)
+    printer_type: Optional[Literal["prusalink", "klipper"]] = None
+    fdm_monster_id: Optional[str] = Field(default=None, max_length=120)
     bed_x_mm: Optional[float] = Field(default=None, gt=20.0, le=1000.0)
     bed_y_mm: Optional[float] = Field(default=None, gt=20.0, le=1000.0)
     bed_z_mm: Optional[float] = Field(default=None, gt=20.0, le=1000.0)
@@ -178,6 +199,116 @@ class AdminPrinterPatch(BaseModel):
     machine_profile_id: Optional[int] = None
     process_profile_id: Optional[int] = None
     filament_api_printer_id: Optional[str] = Field(default=None, max_length=120)
+
+
+class FdmMonsterRemotePrinterOut(BaseModel):
+    fdm_monster_id: str
+    name: str
+    printer_type: str
+    status: str
+    queue_count: int = 0
+    bed_x_mm: float
+    bed_y_mm: float
+    bed_z_mm: float
+    mmu_slots_count: int
+
+
+class OrcaCatalogVendorSummary(BaseModel):
+    id: str
+    name: str
+    version: str = ""
+    model_count: int
+    machine_count: int
+    process_count: int
+    filament_count: int
+    is_library: bool = False
+
+
+class OrcaCatalogModelOut(BaseModel):
+    id: str
+    name: str
+    family: str = ""
+    manufacturer: str = ""
+    nozzles: list[str] = Field(default_factory=list)
+    default_materials: list[str] = Field(default_factory=list)
+    cover_url: Optional[str] = None
+    bed_x_mm: float = 250.0
+    bed_y_mm: float = 210.0
+    bed_z_mm: float = 220.0
+    mmu_slots_count: int = 1
+    printer_type: str = "prusalink"
+    machine_presets: list[str] = Field(default_factory=list)
+
+
+class OrcaCatalogMachinePresetOut(BaseModel):
+    name: str
+    vendor: str
+    printer_model: str = ""
+    nozzle_diameter: str = "0.4"
+    bed_x_mm: float = 250.0
+    bed_y_mm: float = 210.0
+    bed_z_mm: float = 220.0
+    mmu_slots_count: int = 1
+    printer_type: str = "prusalink"
+
+
+class OrcaCatalogProcessPresetOut(BaseModel):
+    name: str
+    vendor: str
+    layer_height: str = "0.20"
+    compatible_printers: list[str] = Field(default_factory=list)
+
+
+class OrcaCatalogFilamentOut(BaseModel):
+    preset_name: str
+    name: str
+    vendor: str
+    material: str
+    color_hex: str
+    density_g_cm3: float
+    compatible_printers: list[str] = Field(default_factory=list)
+
+
+class OrcaCatalogVendorDetail(BaseModel):
+    id: str
+    name: str
+    version: str = ""
+    is_library: bool = False
+    models: list[OrcaCatalogModelOut] = Field(default_factory=list)
+    machine_presets: list[OrcaCatalogMachinePresetOut] = Field(default_factory=list)
+    process_presets: list[OrcaCatalogProcessPresetOut] = Field(default_factory=list)
+    filaments: list[OrcaCatalogFilamentOut] = Field(default_factory=list)
+
+
+class OrcaCatalogImportPrinterRequest(BaseModel):
+    vendor: str = Field(min_length=1, max_length=120)
+    machine_preset_name: str = Field(min_length=1, max_length=200)
+    process_preset_name: Optional[str] = Field(default=None, max_length=200)
+    filament_preset_names: list[str] = Field(default_factory=list)
+    display_name: Optional[str] = Field(default=None, max_length=150)
+    fdm_monster_id: Optional[str] = Field(default=None, max_length=120)
+    filament_api_printer_id: Optional[str] = Field(default=None, max_length=120)
+    target_printer_id: Optional[int] = None
+    mmu_slots_override: Optional[int] = Field(default=None, ge=1, le=16)
+
+
+class OrcaCatalogImportPrinterResult(BaseModel):
+    printer: AdminPrinterOut
+    machine_profile: OrcaProfileOut
+    process_profile: Optional[OrcaProfileOut] = None
+    filaments: list[FilamentOut] = Field(default_factory=list)
+
+
+class OrcaCatalogImportFilamentsRequest(BaseModel):
+    vendor: str = Field(min_length=1, max_length=120)
+    preset_names: list[str] = Field(min_length=1)
+    update_existing: bool = True
+
+
+class OrcaCatalogImportFilamentsResult(BaseModel):
+    filaments: list[FilamentOut] = Field(default_factory=list)
+    created_count: int = 0
+    updated_count: int = 0
 
 
 class PrinterSlotUpdate(BaseModel):
@@ -263,6 +394,8 @@ class JobDetail(BaseModel):
     budget_check: Optional[BudgetCheckOut] = None
     student_note: Optional[str] = None
     admin_note: Optional[str] = None
+    slice_error: Optional[str] = None
+    slice_queue_position: Optional[int] = None
     fdm_monster_job_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -457,6 +590,8 @@ class AdminTeacherCreate(BaseModel):
     identifier: str = Field(min_length=2, max_length=120)
     name: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=4, max_length=128)
+    role: Literal["teacher", "tech"] = "teacher"
+    hierarchy_rank: Optional[int] = Field(default=None, ge=1, le=99)
     permissions: Optional[list[str]] = None
     preset: Optional[str] = None
 
@@ -481,6 +616,8 @@ class AdminTeacherCreate(BaseModel):
 
 class AdminTeacherPatch(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    role: Optional[Literal["teacher", "tech"]] = None
+    hierarchy_rank: Optional[int] = Field(default=None, ge=1, le=99)
     is_active: Optional[bool] = None
     permissions: Optional[list[str]] = None
     preset: Optional[str] = None
@@ -501,6 +638,9 @@ class AdminTeacherOut(BaseModel):
     id: int
     da: str
     name: str
+    role: Literal["student", "teacher", "tech", "admin"] = "teacher"
+    hierarchy_rank: int = 50
+    can_manage: bool = True
     is_active: bool
     permissions: list[str] = Field(default_factory=list)
     has_custom_permissions: bool = False
@@ -514,10 +654,14 @@ class AdminTeacherOut(BaseModel):
 class PermissionCatalogItem(BaseModel):
     key: str
     group: str
+    resource: str = ""
+    admin_only: bool = False
 
 
 class PermissionPresetOut(BaseModel):
     id: str
+    role: str = "teacher"
+    default_rank: int = 50
     permissions: list[str]
 
 
@@ -525,6 +669,7 @@ class PermissionCatalogOut(BaseModel):
     permissions: list[PermissionCatalogItem]
     presets: list[PermissionPresetOut]
     role_defaults: dict[str, list[str]]
+    admin_only_permissions: list[str] = Field(default_factory=list)
 
 
 class TeacherClassCreate(BaseModel):
@@ -747,6 +892,7 @@ class SystemSettingsOut(BaseModel):
     has_fdm_monster_api_key: bool
     slicer_mode: Literal["mock", "orcaslicer"]
     orca_cli_path: str
+    max_concurrent_slices: int = 2
     filament_api_enabled: bool
     filament_api_url: str
 
@@ -762,8 +908,69 @@ class SystemSettingsPatch(BaseModel):
     fdm_monster_api_key: Optional[str] = Field(default=None, max_length=255)
     slicer_mode: Optional[Literal["mock", "orcaslicer"]] = None
     orca_cli_path: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    max_concurrent_slices: Optional[int] = Field(default=None, ge=1, le=4)
     filament_api_enabled: Optional[bool] = None
     filament_api_url: Optional[str] = Field(default=None, max_length=255)
+
+
+# --- Setup Wizard & Slice Queue ---
+
+class SetupStatusOut(BaseModel):
+    needs_setup: bool
+    has_admin: bool
+    token_valid: bool
+    setup_completed: bool
+    dev_mode: bool
+    institution: str
+    suggested_orca_path: str
+    current_settings: dict
+
+
+class SetupTestOrcaRequest(BaseModel):
+    orca_cli_path: str = Field(default="", max_length=255)
+    token: Optional[str] = Field(default=None, max_length=255)
+
+
+class SetupTestOrcaOut(BaseModel):
+    ok: bool
+    path: Optional[str] = None
+    version: Optional[str] = None
+    detail: str
+
+
+class SetupTestFdmRequest(BaseModel):
+    fdm_monster_url: str = Field(min_length=1, max_length=255)
+    fdm_monster_api_key: Optional[str] = Field(default=None, max_length=255)
+    token: Optional[str] = Field(default=None, max_length=255)
+
+
+class SetupTestFdmOut(BaseModel):
+    ok: bool
+    printer_count: int = 0
+    printers: list[dict] = Field(default_factory=list)
+    detail: str
+
+
+class SetupCompleteRequest(BaseModel):
+    token: Optional[str] = None
+    admin_username: Optional[str] = Field(default=None, max_length=120)
+    admin_name: Optional[str] = Field(default=None, max_length=120)
+    admin_password: Optional[str] = Field(default=None, max_length=128)
+    institution: Optional[str] = Field(default=None, max_length=150)
+    slicer_mode: Optional[Literal["mock", "orcaslicer"]] = None
+    orca_cli_path: Optional[str] = Field(default=None, max_length=255)
+    max_concurrent_slices: Optional[int] = Field(default=None, ge=1, le=4)
+    fdm_monster_mode: Optional[Literal["mock", "live"]] = None
+    fdm_monster_url: Optional[str] = Field(default=None, max_length=255)
+    fdm_monster_api_key: Optional[str] = Field(default=None, max_length=255)
+    default_max_active_grams: Optional[float] = Field(default=None, gt=0.0, le=5000.0)
+    default_max_print_minutes: Optional[int] = Field(default=None, gt=0, le=10080)
+
+
+class SliceQueueStatsOut(BaseModel):
+    active_workers: int
+    queued_count: int
+    max_workers: int
 
 
 class UpdateJobStatusOut(BaseModel):

@@ -178,7 +178,7 @@ def test_job_completion_triggers_user_webhook_on_dev_complete_and_poll(
         job_id = up.json()["id"]
 
         sl = client.post(
-            f"/api/jobs/{job_id}/slice",
+            f"/api/jobs/{job_id}/slice?sync=true",
             headers=headers,
             json={
                 "printer_id": printer["id"],

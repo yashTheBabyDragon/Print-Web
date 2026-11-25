@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -132,6 +133,107 @@ def _validate_bed_bounds(bounds: BoundsResult, printer: Printer) -> None:
 
     if violations:
         raise OutOfBoundsError("Model exceeds printer build volume: " + "; ".join(violations))
+
+
+def _cluster_mesh_grid(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    b_min: np.ndarray,
+    b_max: np.ndarray,
+    grid_res: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Quantize vertices onto a uniform 3D grid, average clusters, and preserve exact bounds."""
+    extent = np.maximum(b_max - b_min, 1e-6)
+    cell_size = float(np.max(extent)) / float(max(8, grid_res))
+    q = np.floor((verts - b_min) / cell_size).astype(np.int64)
+    stride = int(grid_res) + 4
+    keys = q[:, 0] + stride * (q[:, 1] + stride * q[:, 2])
+    _, _, inverse = np.unique(keys, return_index=True, return_inverse=True)
+    n_clusters = int(inverse.max()) + 1 if len(inverse) else 0
+    if n_clusters == 0:
+        return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int64)
+
+    sums = np.zeros((n_clusters, 3), dtype=np.float64)
+    counts = np.bincount(inverse, minlength=n_clusters).astype(np.float64)
+    np.add.at(sums, inverse, verts)
+    cluster_verts = sums / counts[:, None]
+
+    mapped = inverse[faces]
+    valid = (mapped[:, 0] != mapped[:, 1]) & (mapped[:, 1] != mapped[:, 2]) & (mapped[:, 2] != mapped[:, 0])
+    mapped = mapped[valid]
+    if len(mapped) == 0:
+        return np.empty((0, 3), dtype=np.float64), np.empty((0, 3), dtype=np.int64)
+
+    sorted_tri = np.ascontiguousarray(np.sort(mapped, axis=1))
+    tri_view = sorted_tri.view(np.dtype((np.void, sorted_tri.dtype.itemsize * 3))).ravel()
+    _, uniq_tri_idx = np.unique(tri_view, return_index=True)
+    out_faces = mapped[np.sort(uniq_tri_idx)]
+
+    used_v, remapped_faces = np.unique(out_faces, return_inverse=True)
+    out_verts = cluster_verts[used_v]
+    out_faces = remapped_faces.reshape(-1, 3)
+
+    # Pin exact original min/max extrema on every axis so client 3D Box3 bounds stay identical
+    for ax in range(3):
+        out_verts[int(np.argmin(out_verts[:, ax])), ax] = float(b_min[ax])
+        out_verts[int(np.argmax(out_verts[:, ax])), ax] = float(b_max[ax])
+
+    return out_verts, out_faces
+
+
+def generate_preview_stl(
+    oriented_stl_path: Path,
+    preview_stl_path: Path,
+    max_faces: int = 120000,
+    target_faces: int = 60000,
+) -> bool:
+    """Generate a lightweight preview STL via vectorized grid clustering when faces exceed max_faces."""
+    mesh = _load_mesh(oriented_stl_path)
+    face_count = len(mesh.faces)
+    if face_count <= max_faces:
+        return False
+
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    b_min = verts.min(axis=0)
+    b_max = verts.max(axis=0)
+
+    grid_res = max(20, min(180, int(round(math.sqrt(max(target_faces, 1000) / 6.0)))))
+    best_verts: Optional[np.ndarray] = None
+    best_faces: Optional[np.ndarray] = None
+
+    for _ in range(4):
+        out_verts, out_faces = _cluster_mesh_grid(verts, faces, b_min, b_max, grid_res)
+        n_out = len(out_faces)
+        if n_out > 0 and n_out <= max_faces:
+            if best_faces is None or abs(n_out - target_faces) < abs(len(best_faces) - target_faces):
+                best_verts, best_faces = out_verts, out_faces
+        if n_out == 0:
+            grid_res = min(256, int(grid_res * 1.6))
+            continue
+        if n_out > max_faces:
+            scale_factor = math.sqrt(target_faces / float(n_out))
+            next_res = max(12, int(round(grid_res * max(0.35, min(0.85, scale_factor)))))
+            if next_res == grid_res:
+                next_res = max(12, grid_res - 4)
+            grid_res = next_res
+            continue
+        if n_out < max(500, target_faces // 3) and grid_res < 256:
+            scale_factor = math.sqrt(target_faces / float(max(1, n_out)))
+            next_res = min(256, int(round(grid_res * min(1.8, max(1.2, scale_factor)))))
+            if next_res == grid_res:
+                break
+            grid_res = next_res
+            continue
+        break
+
+    if best_faces is None or best_verts is None or len(best_faces) == 0:
+        return False
+
+    decimated = trimesh.Trimesh(vertices=best_verts, faces=best_faces, process=False)
+    preview_stl_path.parent.mkdir(parents=True, exist_ok=True)
+    decimated.export(str(preview_stl_path), file_type="stl")
+    return True
 
 
 def _chain_2d_segments(segments: np.ndarray) -> list[tuple[list[tuple[float, float]], bool]]:
@@ -787,7 +889,7 @@ class MockTrimeshSlicer:
 
 
 def _index_vendor_presets(search_dirs: list[Path]) -> dict[str, dict[str, Any]]:
-    """Index OrcaSlicer preset JSONs by preset name across directories and vendor .zip archives."""
+    """Index OrcaSlicer preset JSONs by preset name across .opc archives, directories, and .zip files."""
     presets: dict[str, dict[str, Any]] = {}
 
     def _register(raw_text: str) -> None:
@@ -799,6 +901,16 @@ def _index_vendor_presets(search_dirs: list[Path]) -> dict[str, dict[str, Any]]:
             name = loaded.get("name")
             if isinstance(name, str) and name.strip() and name not in presets:
                 presets[name.strip()] = loaded
+
+    try:
+        from app.services.orca_catalog import get_orca_catalog
+
+        catalog = get_orca_catalog(extra_dirs=search_dirs)
+        for pname, pdata in catalog.presets_by_name.items():
+            if pname not in presets:
+                presets[pname] = pdata
+    except Exception:
+        pass
 
     for root in search_dirs:
         if not root.exists():
@@ -844,6 +956,9 @@ def resolve_and_flatten_profile(
         search_dirs: list[Path] = []
         if extra_search_dirs:
             search_dirs.extend(extra_search_dirs)
+        builtin_profiles = Path("/opt/orcaslicer-builtin/resources/profiles")
+        if builtin_profiles.is_dir():
+            search_dirs.append(builtin_profiles)
         search_dirs.extend(detect_orca_resources_profiles_dirs(cli_path))
         presets_by_name = _index_vendor_presets(search_dirs)
 
@@ -1052,6 +1167,70 @@ def validate_orca_cli_path(cli_path: str) -> str:
         f"Executable '{cleaned}' is not an allowed OrcaSlicer binary "
         f"(allowed: {', '.join(sorted(ALLOWED_ORCA_CLI_BASENAMES))}, or AppRun under an Orca path)"
     )
+
+
+def probe_orcaslicer(cli_path: Optional[str] = None) -> tuple[bool, Optional[str], str]:
+    """Probe an OrcaSlicer CLI binary with --help (timeout 15s) and report availability/version."""
+    raw_path = (cli_path or "").strip() or detect_orca_cli_path() or ""
+    if not raw_path:
+        return False, None, "OrcaSlicer binary not found"
+
+    try:
+        validated = validate_orca_cli_path(raw_path)
+    except ValueError as exc:
+        return False, None, str(exc)
+
+    resolved: Optional[str] = None
+    if "/" in validated or "\\" in validated:
+        cand = Path(validated)
+        if cand.is_file():
+            resolved = str(cand)
+    else:
+        resolved = shutil.which(validated)
+        if resolved is None and Path(validated).is_file():
+            resolved = validated
+
+    if not resolved:
+        return False, None, f"OrcaSlicer binary not found at '{validated}'"
+
+    try:
+        proc = subprocess.run(
+            [resolved, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except FileNotFoundError:
+        return False, None, f"OrcaSlicer binary not found at '{resolved}'"
+    except subprocess.TimeoutExpired:
+        return False, None, f"OrcaSlicer probe timed out after 15s ('{resolved}')"
+    except OSError as exc:
+        return False, None, f"Failed to execute OrcaSlicer '{resolved}': {exc}"
+
+    combined = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    version: Optional[str] = None
+    ver_match = re.search(
+        r"(?:OrcaSlicer|orca-slicer)[^\r\n]*?\bv?(\d+\.\d+\.\d+(?:[-+._a-zA-Z0-9]*)?)",
+        combined,
+        re.IGNORECASE,
+    )
+    if not ver_match:
+        ver_match = re.search(r"\bversion[:\s]+v?(\d+\.\d+\.\d+(?:[-+._a-zA-Z0-9]*)?)", combined, re.IGNORECASE)
+    if ver_match:
+        version = ver_match.group(1)
+
+    if proc.returncode != 0:
+        err_text = (proc.stderr or proc.stdout or "").strip()
+        snippet = err_text.splitlines()[0][:240] if err_text else ""
+        detail = (
+            f"OrcaSlicer exited with code {proc.returncode}: {snippet}"
+            if snippet
+            else f"OrcaSlicer exited with code {proc.returncode}"
+        )
+        return False, version, detail
+
+    detail = f"OrcaSlicer CLI ready ({version})" if version else f"OrcaSlicer CLI ready ({resolved})"
+    return True, version, detail
 
 
 class OrcaSlicerCliAdapter:
@@ -1371,6 +1550,8 @@ class OrcaSlicerCliAdapter:
                 return _extract_bounds(loaded)
             except FileNotFoundError as exc:
                 raise SlicerError(f"OrcaSlicer binary not found at '{self.cli_path}'") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise SlicerError(f"OrcaSlicer orient timed out after {exc.timeout}s") from exc
             except subprocess.CalledProcessError as exc:
                 raise SlicerError(f"OrcaSlicer orient failed: {exc.stderr or exc.stdout}") from exc
 
@@ -1456,6 +1637,8 @@ class OrcaSlicerCliAdapter:
                 subprocess.run(cmd, capture_output=True, text=True, timeout=180, check=True)
             except FileNotFoundError as exc:
                 raise SlicerError(f"OrcaSlicer binary not found at '{self.cli_path}'") from exc
+            except subprocess.TimeoutExpired as exc:
+                raise SlicerError(f"OrcaSlicer slice timed out after {exc.timeout}s") from exc
             except subprocess.CalledProcessError as exc:
                 raise SlicerError(f"OrcaSlicer slice failed: {exc.stderr or exc.stdout}") from exc
 
@@ -1512,12 +1695,9 @@ def build_command_preview(
 def run_auto_orient(
     original_stl_path: Path,
     oriented_stl_path: Path,
-    sys_settings: SystemSettings,
+    sys_settings: Optional[SystemSettings] = None,
 ) -> BoundsResult:
-    """Auto-orient an uploaded STL using the configured slicer mode."""
-    if not settings.dev_seed or sys_settings.slicer_mode == "orcaslicer":
-        adapter = OrcaSlicerCliAdapter(cli_path=sys_settings.orca_cli_path)
-        return adapter.auto_orient_stl(original_stl_path, oriented_stl_path)
+    """Auto-orient an uploaded STL using fast pure-Python orientation (never blocks on Orca GUI)."""
     return MockTrimeshSlicer().auto_orient_stl(original_stl_path, oriented_stl_path)
 
 

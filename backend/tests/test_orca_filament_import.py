@@ -177,7 +177,7 @@ def test_import_orca_filaments_rbac_and_empty_validation(client: TestClient):
         files=[("files", ("blocked.json", raw, "application/json"))],
     )
     assert r_teacher.status_code == 403
-    assert r_teacher.json()["detail"]["required_permission"] == "filaments:manage"
+    assert r_teacher.json()["detail"]["required_permission"] == "filaments:create_delete"
 
     # No files provided -> 400
     r_empty = client.post(

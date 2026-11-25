@@ -162,6 +162,13 @@ def build_user_summary(
         da=user.da,
         name=user.name,
         role=user.role,  # type: ignore[arg-type]
+        hierarchy_rank=int(
+            getattr(
+                user,
+                "hierarchy_rank",
+                100 if user.role == "admin" else (0 if user.role == "student" else 50),
+            )
+        ),
         permissions=get_user_permissions(user),
         approval_status=user.approval_status,  # type: ignore[arg-type]
         teachers=teachers,

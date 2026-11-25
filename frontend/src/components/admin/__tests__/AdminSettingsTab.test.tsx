@@ -36,7 +36,7 @@ describe('AdminSettingsTab', () => {
     });
   });
 
-  it('toggles FilamentAPI settings, updates URL, and saves', async () => {
+  it('toggles FilamentAPI settings under Slicer & Gateways, updates URL, and saves', async () => {
     const user = userEvent.setup();
     const updateSpy = vi
       .spyOn(api, 'adminUpdateSettings')
@@ -53,6 +53,8 @@ describe('AdminSettingsTab', () => {
         <AdminSettingsTab settings={BASE_SETTINGS} onReload={onReload} onError={onError} />
       </I18nProvider>
     );
+
+    await user.click(screen.getByRole('tab', { name: /Slicer & Gateways/i }));
 
     const toggle = screen.getByLabelText(/Enable automatic filament switching/i);
     expect(toggle).not.toBeChecked();
@@ -100,6 +102,7 @@ describe('AdminSettingsTab', () => {
       </I18nProvider>
     );
 
+    await user.click(screen.getByRole('tab', { name: /Slicer & Gateways/i }));
     await user.click(screen.getByRole('button', { name: /Test connection/i }));
 
     await waitFor(() => {
@@ -121,7 +124,7 @@ describe('AdminSettingsTab', () => {
     expect(await screen.findByText(/Connection failed: Connection refused/i)).toBeInTheDocument();
   });
 
-  it('displays software version status and forces an update check on button click', async () => {
+  it('displays software version status under System Updates and forces an update check on click', async () => {
     const user = userEvent.setup();
     const updateStatusSpy = vi
       .spyOn(api, 'adminGetUpdateStatus')
@@ -154,6 +157,8 @@ describe('AdminSettingsTab', () => {
       </I18nProvider>
     );
 
+    await user.click(screen.getByRole('tab', { name: /System Updates/i }));
+
     expect(await screen.findByText('Up to date')).toBeInTheDocument();
     expect(
       screen.getByText('sudo /opt/ggprint/deploy/update-from-release.sh')
@@ -169,6 +174,7 @@ describe('AdminSettingsTab', () => {
   });
 
   it('refuses to render unsafe or non-GitHub release_url links', async () => {
+    const user = userEvent.setup();
     vi.spyOn(api, 'adminGetUpdateStatus').mockResolvedValueOnce({
       current_version: '1.0.0',
       latest_version: '1.2.0',
@@ -188,6 +194,8 @@ describe('AdminSettingsTab', () => {
         />
       </I18nProvider>
     );
+
+    await user.click(screen.getByRole('tab', { name: /System Updates/i }));
 
     expect(await screen.findByText('Update available')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /View release on GitHub/i })).not.toBeInTheDocument();
@@ -224,12 +232,10 @@ describe('AdminSettingsTab', () => {
       </I18nProvider>
     );
 
-    // Updates-only mode: no system settings form, Update button visible
     expect(screen.queryByRole('button', { name: /Save settings/i })).not.toBeInTheDocument();
     const updateBtn = await screen.findByRole('button', { name: /Update to v1\.3\.0/i });
     await user.click(updateBtn);
 
-    // Confirm inline prompt
     await user.click(screen.getByRole('button', { name: /^Confirm$/i }));
 
     await waitFor(() => {
@@ -238,7 +244,8 @@ describe('AdminSettingsTab', () => {
     expect(await screen.findByText(/Update to 1\.3\.0 queued/i)).toBeInTheDocument();
   });
 
-  it('hides mock mode options when not in dev mode', () => {
+  it('replaces mock mode dropdowns with production badges when not in dev mode', async () => {
+    const user = userEvent.setup();
     render(
       <I18nProvider>
         <AdminSettingsTab
@@ -250,8 +257,10 @@ describe('AdminSettingsTab', () => {
       </I18nProvider>
     );
 
+    await user.click(screen.getByRole('tab', { name: /Slicer & Gateways/i }));
+
     expect(screen.queryByRole('option', { name: /Mock/i })).not.toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /OrcaSlicer/i })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /Live/i })).toBeInTheDocument();
+    expect(screen.getByText(/OrcaSlicer CLI \(Production\)/i)).toBeInTheDocument();
+    expect(screen.getByText(/Live FDM Monster gateway/i)).toBeInTheDocument();
   });
 });

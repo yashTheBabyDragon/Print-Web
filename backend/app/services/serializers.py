@@ -6,7 +6,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import PrintJob, Printer, PrinterSlot, SystemSettings, User
+from app.models import JobStatus, PrintJob, Printer, PrinterSlot, SystemSettings, User
 from app.schemas import (
     AdminPrinterOut,
     BoundingBoxOut,
@@ -16,6 +16,7 @@ from app.schemas import (
     SystemSettingsOut,
 )
 from app.services.budget import compute_budget_check
+from app.services.slice_queue import slice_queue
 
 
 def serialize_slot(slot: PrinterSlot) -> PrinterSlotOut:
@@ -33,10 +34,11 @@ def serialize_slot(slot: PrinterSlot) -> PrinterSlotOut:
 
 
 def serialize_printer(printer: Printer) -> PrinterOut:
+    fdm_id = str(printer.fdm_monster_id or "")
     return PrinterOut(
         id=printer.id,
         name=printer.display_name or printer.name,
-        fdm_monster_id=printer.fdm_monster_id,
+        fdm_monster_id=fdm_id,
         printer_type=printer.printer_type,
         status=printer.status,
         queue_count=printer.queue_count,
@@ -45,6 +47,8 @@ def serialize_printer(printer: Printer) -> PrinterOut:
         bed_z_mm=printer.bed_z_mm,
         mmu_slots_count=printer.mmu_slots_count,
         has_mmu=printer.mmu_slots_count > 1,
+        is_manual=bool(getattr(printer, "is_manual", False)),
+        is_fdm_linked=bool(fdm_id) and not fdm_id.startswith("manual-"),
         slots=[serialize_slot(s) for s in sorted(printer.slots, key=lambda x: x.slot_index)],
     )
 
@@ -82,6 +86,14 @@ def serialize_job(
     if job.teacher_id is not None:
         teacher = job.teacher if job.teacher is not None else db.get(User, job.teacher_id)
         teacher_name = teacher.name if teacher else None
+
+    queue_pos: Optional[int] = None
+    if job.status in (JobStatus.SLICING_QUEUED.value, JobStatus.SLICING.value):
+        pos = slice_queue.get_position(job.id)
+        if pos is not None:
+            queue_pos = pos
+        elif job.status == JobStatus.SLICING.value:
+            queue_pos = 0
 
     return JobDetail(
         id=job.id,
@@ -129,6 +141,8 @@ def serialize_job(
         budget_check=budget_check,
         student_note=job.student_note,
         admin_note=job.admin_note,
+        slice_error=job.slice_error,
+        slice_queue_position=queue_pos,
         fdm_monster_job_id=job.fdm_monster_job_id,
         created_at=job.created_at,
         updated_at=job.updated_at,
@@ -156,6 +170,7 @@ def serialize_settings(sys_settings: SystemSettings) -> SystemSettingsOut:
         has_fdm_monster_api_key=bool(raw_key),
         slicer_mode=slicer_mode,  # type: ignore[arg-type]
         orca_cli_path=sys_settings.orca_cli_path,
+        max_concurrent_slices=max(1, min(4, int(getattr(sys_settings, "max_concurrent_slices", 2) or 2))),
         filament_api_enabled=sys_settings.filament_api_enabled,
         filament_api_url=sys_settings.filament_api_url,
     )

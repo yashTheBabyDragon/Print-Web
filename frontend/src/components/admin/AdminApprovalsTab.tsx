@@ -16,6 +16,9 @@ interface AdminApprovalsTabProps {
   accountRequests: PendingAccountRequest[];
   classes: TeacherClass[];
   isSuperAdmin: boolean;
+  canApproveJobs?: boolean;
+  canApproveAccounts?: boolean;
+  canAdjustQuotas?: boolean;
   onReload: () => Promise<void>;
   onError: (msg: string) => void;
 }
@@ -25,6 +28,9 @@ export function AdminApprovalsTab({
   accountRequests,
   classes,
   isSuperAdmin,
+  canApproveJobs = true,
+  canApproveAccounts = true,
+  canAdjustQuotas = true,
   onReload,
   onError,
 }: AdminApprovalsTabProps) {
@@ -114,6 +120,7 @@ export function AdminApprovalsTab({
   return (
     <div className="space-y-8">
       {/* Pending Account Requests Section */}
+      {canApproveAccounts && (
       <section className="space-y-3">
         <div>
           <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
@@ -223,8 +230,11 @@ export function AdminApprovalsTab({
           </div>
         )}
       </section>
+      )}
 
       {/* Print Approval Requests Section */}
+      {canApproveJobs && (
+      <>
       <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
@@ -291,29 +301,33 @@ export function AdminApprovalsTab({
                   </div>
 
                   <div className="grid grid-cols-1 gap-3 border-t border-black/[0.07] pt-4 dark:border-white/[0.08] md:grid-cols-12">
-                    <div className="md:col-span-3">
-                      <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
-                        {t.admin.approvals.newGramsLabel}
-                      </label>
-                      <input
-                        type="number"
-                        value={d.grams}
-                        onChange={(e) => updateDraft(job.id, job, { grams: e.target.value })}
-                        className="studio-input py-1.5 font-mono text-xs tabular-nums"
-                      />
-                    </div>
-                    <div className="md:col-span-3">
-                      <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
-                        {t.admin.approvals.newMinutesLabel}
-                      </label>
-                      <input
-                        type="number"
-                        value={d.minutes}
-                        onChange={(e) => updateDraft(job.id, job, { minutes: e.target.value })}
-                        className="studio-input py-1.5 font-mono text-xs tabular-nums"
-                      />
-                    </div>
-                    <div className="md:col-span-6">
+                    {canAdjustQuotas && (
+                      <>
+                        <div className="md:col-span-3">
+                          <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
+                            {t.admin.approvals.newGramsLabel}
+                          </label>
+                          <input
+                            type="number"
+                            value={d.grams}
+                            onChange={(e) => updateDraft(job.id, job, { grams: e.target.value })}
+                            className="studio-input py-1.5 font-mono text-xs tabular-nums"
+                          />
+                        </div>
+                        <div className="md:col-span-3">
+                          <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
+                            {t.admin.approvals.newMinutesLabel}
+                          </label>
+                          <input
+                            type="number"
+                            value={d.minutes}
+                            onChange={(e) => updateDraft(job.id, job, { minutes: e.target.value })}
+                            className="studio-input py-1.5 font-mono text-xs tabular-nums"
+                          />
+                        </div>
+                      </>
+                    )}
+                    <div className={canAdjustQuotas ? 'md:col-span-6' : 'md:col-span-12'}>
                       <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
                         {t.admin.approvals.adminNoteLabel}
                       </label>
@@ -345,15 +359,17 @@ export function AdminApprovalsTab({
                         <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
                         {t.admin.approvals.approveOnce}
                       </button>
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() => handleDecision(job, 'approve_and_raise')}
-                        className="btn-primary py-1.5 text-xs"
-                      >
-                        <ShieldCheck className="h-3.5 w-3.5" />
-                        {t.admin.approvals.approveAndRaise}
-                      </button>
+                      {canAdjustQuotas && (
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleDecision(job, 'approve_and_raise')}
+                          className="btn-primary py-1.5 text-xs"
+                        >
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                          {t.admin.approvals.approveAndRaise}
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -396,6 +412,8 @@ export function AdminApprovalsTab({
             ))}
           </div>
         </section>
+      )}
+      </>
       )}
     </div>
   );

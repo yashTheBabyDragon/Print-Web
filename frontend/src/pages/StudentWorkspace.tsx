@@ -74,6 +74,8 @@ export function StudentWorkspace({
     outOfBounds: false,
   });
   const [sliceStale, setSliceStale] = useState(false);
+  const sliceStaleRef = useRef(sliceStale);
+  sliceStaleRef.current = sliceStale;
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('prepare');
   const [sliceVersion, setSliceVersion] = useState(0);
   const [previewState, setPreviewState] = useState<PreviewStatusState>({
@@ -131,6 +133,14 @@ export function StudentWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const prevVisibleRef = useRef(isVisible);
+  useEffect(() => {
+    if (isVisible && !prevVisibleRef.current) {
+      api.getPrinters().then(setPrinters).catch(() => {});
+    }
+    prevVisibleRef.current = isVisible;
+  }, [isVisible]);
+
   // Load a saved draft selected from My Prints into the active 3D workspace
   useEffect(() => {
     if (!draftToLoad) return;
@@ -159,13 +169,52 @@ export function StudentWorkspace({
     onDraftLoaded?.();
   }, [draftToLoad, onDraftLoaded]);
 
+  // Poll queued/active slicing jobs every 600ms until SLICED or SLICE_FAILED
+  useEffect(() => {
+    const jobId = job?.id;
+    const status = job?.status;
+    if (!jobId || (status !== 'SLICING_QUEUED' && status !== 'SLICING')) {
+      return;
+    }
+
+    let active = true;
+    const poll = async () => {
+      try {
+        const latest = await api.getJob(jobId);
+        if (!active || jobRef.current?.id !== latest.id) return;
+        setJob(latest);
+        if (latest.status === 'SLICED') {
+          if (!sliceStaleRef.current) {
+            setSliceVersion((v) => v + 1);
+            setWorkspaceMode('preview');
+          }
+        } else if (latest.status === 'SLICE_FAILED') {
+          setError(latest.slice_error || t.workspace.sliceFailedFallback);
+        }
+      } catch {
+        // Ignore transient polling errors; next tick will retry
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 600);
+
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [job?.id, job?.status, t]);
+
   // Reset active workspace if the currently open draft was deleted or cleared from My Prints
   useEffect(() => {
     if (!deletedDraftSignal) return;
     const currentJob = jobRef.current;
     if (!currentJob) return;
     const isCurrentDraft =
-      currentJob.status === 'DRAFT' || currentJob.status === 'SLICED';
+      currentJob.status === 'DRAFT' ||
+      currentJob.status === 'SLICED' ||
+      currentJob.status === 'SLICE_FAILED';
     const shouldReset =
       (deletedDraftSignal.target === 'all' && isCurrentDraft) ||
       (typeof deletedDraftSignal.target === 'number' &&
@@ -309,13 +358,43 @@ export function StudentWorkspace({
         supports_enabled: supportsEnabled,
       });
       setJob(sliced);
-      setSliceStale(false);
-      setSliceVersion((v) => v + 1);
-      setWorkspaceMode('preview');
+      if (sliced.status === 'SLICED') {
+        setSliceStale(false);
+        setSliceVersion((v) => v + 1);
+        setWorkspaceMode('preview');
+      } else if (sliced.status === 'SLICING_QUEUED' || sliced.status === 'SLICING') {
+        setSliceStale(false);
+      } else if (sliced.status === 'SLICE_FAILED') {
+        setError(sliced.slice_error || t.workspace.sliceFailedFallback);
+      }
     } catch (err) {
       setError(translateApiError(err, t));
     } finally {
       setSlicing(false);
+    }
+  };
+
+  const [downloadingGcode, setDownloadingGcode] = useState(false);
+
+  const handleDownloadGcode = async () => {
+    if (!job) return;
+    setError(null);
+    setDownloadingGcode(true);
+    try {
+      const text = await api.fetchJobGcodeText(job.id);
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = job.gcode_filename || `print-${job.id}.gcode`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(translateApiError(err, t));
+    } finally {
+      setDownloadingGcode(false);
     }
   };
 
@@ -356,6 +435,24 @@ export function StudentWorkspace({
   const isAlreadySubmitted =
     job != null &&
     ['PENDING_APPROVAL', 'QUEUED', 'PRINTING', 'COMPLETED'].includes(job.status);
+
+  const isSlicingActive =
+    slicing || job?.status === 'SLICING_QUEUED' || job?.status === 'SLICING';
+
+  const sliceButtonLabel = (() => {
+    if (job?.status === 'SLICING_QUEUED') {
+      return job.slice_queue_position != null && job.slice_queue_position > 0
+        ? t.workspace.slicingQueuedPos.replace('{pos}', String(job.slice_queue_position))
+        : t.workspace.slicingQueued;
+    }
+    if (job?.status === 'SLICING' || slicing) {
+      return t.workspace.slicingInProgress;
+    }
+    if (job?.status === 'SLICE_FAILED') {
+      return t.workspace.retrySliceBtn;
+    }
+    return t.workspace.sliceBtn;
+  })();
 
   const isSlicedAndFresh =
     job != null && job.status === 'SLICED' && !sliceStale && !bounds.outOfBounds;
@@ -712,11 +809,11 @@ export function StudentWorkspace({
                       <button
                         type="button"
                         onClick={handleSlice}
-                        disabled={slicing || bounds.outOfBounds || !selectedSlotId}
+                        disabled={isSlicingActive || bounds.outOfBounds || !selectedSlotId}
                         className="btn-primary min-h-[44px] w-full py-2.5"
                       >
-                        {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
-                        {slicing ? t.workspace.slicingBtn : t.workspace.sliceBtn}
+                        {isSlicingActive && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {sliceButtonLabel}
                       </button>
                       ) : (
                         <>
@@ -730,11 +827,11 @@ export function StudentWorkspace({
                           <button
                             type="button"
                             onClick={handleSlice}
-                            disabled={slicing || bounds.outOfBounds || !selectedSlotId}
+                            disabled={isSlicingActive || bounds.outOfBounds || !selectedSlotId}
                             className="btn-secondary min-h-[44px] w-full py-2"
                           >
-                            {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
-                            {slicing ? t.workspace.slicingBtn : t.workspace.tabs.reSliceBtn}
+                            {isSlicingActive && <Loader2 className="h-4 w-4 animate-spin" />}
+                            {isSlicingActive ? sliceButtonLabel : t.workspace.tabs.reSliceBtn}
                           </button>
                         </>
                       )
@@ -750,12 +847,27 @@ export function StudentWorkspace({
                           <button
                             type="button"
                             onClick={handleSlice}
-                            disabled={slicing || bounds.outOfBounds || !selectedSlotId}
+                            disabled={isSlicingActive || bounds.outOfBounds || !selectedSlotId}
                             className="btn-primary min-h-[44px] w-full py-2.5"
                           >
-                            {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
-                            {slicing ? t.workspace.slicingBtn : t.workspace.sliceBtn}
+                            {isSlicingActive && <Loader2 className="h-4 w-4 animate-spin" />}
+                            {sliceButtonLabel}
                           </button>
+                        ) : activePrinter && activePrinter.is_fdm_linked === false ? (
+                          <div className="space-y-2">
+                            <div className="rounded-xl bg-[#00A7D9]/10 px-3 py-2 text-[11px] font-medium text-[#007BA3] dark:text-[#38C6F4]">
+                              {t.workspace.standalonePrinterNote}
+                            </div>
+                            <button
+                              type="button"
+                              disabled={downloadingGcode || previewState.loading || !previewState.ready}
+                              onClick={() => void handleDownloadGcode()}
+                              className="btn-primary min-h-[44px] w-full py-2.5"
+                            >
+                              {downloadingGcode && <Loader2 className="h-4 w-4 animate-spin" />}
+                              {downloadingGcode ? t.workspace.downloadingGcode : t.workspace.downloadGcodeBtn}
+                            </button>
+                          </div>
                         ) : job.budget_check?.can_auto_submit ? (
                           <button
                             type="button"
@@ -825,7 +937,7 @@ export function StudentWorkspace({
           sliceVersion={sliceVersion}
           sliceStale={sliceStale}
           onReSlice={handleSlice}
-          slicing={slicing}
+          slicing={isSlicingActive}
           onPreviewStateChange={setPreviewState}
         />
       </div>

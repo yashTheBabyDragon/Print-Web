@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -11,15 +12,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.config import DEFAULT_JWT_SECRET, settings
 from app.database import SessionLocal, init_db
-from app.routers import admin, auth, jobs, printers, samples
+from app.models import JobStatus, PrintJob
+from app.routers import admin, auth, jobs, printers, samples, setup
 from app.seed import seed_database
+from app.services.budget import get_system_settings
 from app.services.drafts import purge_expired_drafts
 from app.services.fdm_monster import poll_fdm_monster_once
 from app.services.filament_api import poll_filament_api_once
+from app.services.slice_queue import slice_queue
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +88,29 @@ async def lifespan(_app: FastAPI):
     with SessionLocal() as db:
         seed_database(db)
         purge_expired_drafts(db)
+        stale_jobs = list(
+            db.scalars(
+                select(PrintJob).where(
+                    PrintJob.status.in_([JobStatus.SLICING_QUEUED.value, JobStatus.SLICING.value])
+                )
+            )
+        )
+        for stale_job in stale_jobs:
+            stale_job.status = JobStatus.DRAFT.value
+        if stale_jobs:
+            db.commit()
+        sys_settings = get_system_settings(db)
+        max_slice_workers = max(1, min(4, int(getattr(sys_settings, "max_concurrent_slices", 2) or 2)))
 
+    slice_queue.start(max_workers=max_slice_workers)
     poller_task = asyncio.create_task(_fdm_poller_loop())
     draft_purge_task = asyncio.create_task(_draft_purge_loop())
     try:
         yield
     finally:
+        stop_res = slice_queue.stop()
+        if inspect.isawaitable(stop_res):
+            await stop_res
         poller_task.cancel()
         draft_purge_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -130,6 +151,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(setup.router)
 app.include_router(printers.router)
 app.include_router(samples.router)
 app.include_router(jobs.router)

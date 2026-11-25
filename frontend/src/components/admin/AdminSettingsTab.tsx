@@ -16,6 +16,7 @@ import { api } from '../../api/client';
 import { useI18n } from '../../i18n';
 import type {
   FilamentApiHealth,
+  SetupTestOrcaResponse,
   SystemSettings,
   SystemUpdateStatus,
   UpdateJobStatus,
@@ -42,12 +43,17 @@ export function AdminSettingsTab({
   onError,
 }: AdminSettingsTabProps) {
   const { t } = useI18n();
+  const [subTab, setSubTab] = useState<'quotas' | 'integrations' | 'updates'>(() =>
+    canManageSettings ? 'quotas' : 'updates'
+  );
   const [form, setForm] = useState<SystemSettings | null>(settings);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [savedToast, setSavedToast] = useState(false);
   const [testingFilamentApi, setTestingFilamentApi] = useState(false);
   const [filamentApiTest, setFilamentApiTest] = useState<FilamentApiHealth | null>(null);
+  const [testingOrca, setTestingOrca] = useState(false);
+  const [orcaTest, setOrcaTest] = useState<SetupTestOrcaResponse | null>(null);
   const [updateStatus, setUpdateStatus] = useState<SystemUpdateStatus | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -122,6 +128,10 @@ export function AdminSettingsTab({
         fdm_monster_url: form.fdm_monster_url,
         slicer_mode: isDevMode ? form.slicer_mode : 'orcaslicer',
         orca_cli_path: form.orca_cli_path,
+        max_concurrent_slices: Math.max(
+          1,
+          Math.min(4, Number(form.max_concurrent_slices ?? 2))
+        ),
         filament_api_enabled: form.filament_api_enabled,
         filament_api_url: form.filament_api_url,
       };
@@ -137,6 +147,25 @@ export function AdminSettingsTab({
       onError(translateApiError(err, t));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTestOrca = async () => {
+    if (!form) return;
+    setTestingOrca(true);
+    setOrcaTest(null);
+    try {
+      const res = await api.adminTestOrcaSlicer(form.orca_cli_path);
+      setOrcaTest(res);
+    } catch (err) {
+      setOrcaTest({
+        ok: false,
+        path: form.orca_cli_path,
+        version: null,
+        detail: translateApiError(err, t),
+      });
+    } finally {
+      setTestingOrca(false);
     }
   };
 
@@ -191,10 +220,70 @@ export function AdminSettingsTab({
   const activeUpdateBusy =
     triggeringUpdate || updateJob?.state === 'queued' || updateJob?.state === 'updating';
 
+  const effectiveSubTab: 'quotas' | 'integrations' | 'updates' =
+    !canManageSettings && canManageUpdates
+      ? 'updates'
+      : subTab === 'updates' && !canManageUpdates
+        ? 'quotas'
+        : subTab;
+
   return (
-    <div className="space-y-6">
-    {canManageSettings && form && (
+    <div className="space-y-5">
+      <div
+        role="tablist"
+        aria-label={t.admin.tabs.settings}
+        className="inline-flex flex-wrap gap-1 rounded-xl border border-black/[0.08] bg-[#F6F7F9] p-1 dark:border-white/[0.09] dark:bg-[#0D0E11]"
+      >
+        {canManageSettings && (
+          <>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={effectiveSubTab === 'quotas'}
+              onClick={() => setSubTab('quotas')}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                effectiveSubTab === 'quotas'
+                  ? 'bg-white text-[#111318] shadow-sm dark:bg-[#1D2027] dark:text-[#F4F5F7]'
+                  : 'text-[#5B616E] hover:text-[#111318] dark:text-[#9399A6] dark:hover:text-[#F4F5F7]'
+              }`}
+            >
+              {t.admin.settings.subTabs.quotas}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={effectiveSubTab === 'integrations'}
+              onClick={() => setSubTab('integrations')}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                effectiveSubTab === 'integrations'
+                  ? 'bg-white text-[#111318] shadow-sm dark:bg-[#1D2027] dark:text-[#F4F5F7]'
+                  : 'text-[#5B616E] hover:text-[#111318] dark:text-[#9399A6] dark:hover:text-[#F4F5F7]'
+              }`}
+            >
+              {t.admin.settings.subTabs.integrations}
+            </button>
+          </>
+        )}
+        {canManageUpdates && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={effectiveSubTab === 'updates'}
+            onClick={() => setSubTab('updates')}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+              effectiveSubTab === 'updates'
+                ? 'bg-white text-[#111318] shadow-sm dark:bg-[#1D2027] dark:text-[#F4F5F7]'
+                : 'text-[#5B616E] hover:text-[#111318] dark:text-[#9399A6] dark:hover:text-[#F4F5F7]'
+            }`}
+          >
+            {t.admin.settings.subTabs.updates}
+          </button>
+        )}
+      </div>
+
+    {canManageSettings && form && (effectiveSubTab === 'quotas' || effectiveSubTab === 'integrations') && (
     <form onSubmit={handleSubmit} className="space-y-6">
+      {effectiveSubTab === 'quotas' && (
       <div className="studio-surface p-5 space-y-4">
         <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
           {t.admin.settings.limitsTitle}
@@ -273,38 +362,108 @@ export function AdminSettingsTab({
           </label>
         </div>
       </div>
+      )}
 
+      {effectiveSubTab === 'integrations' && (
+      <>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="studio-surface p-5 space-y-4">
           <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
             {t.admin.settings.slicerTitle}
           </h2>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
-              {t.admin.settings.slicerMode}
-            </label>
-            <select
-              value={isDevMode ? form.slicer_mode : 'orcaslicer'}
-              onChange={(e) =>
-                setForm({ ...form, slicer_mode: e.target.value as 'mock' | 'orcaslicer' })
-              }
-              disabled={!isDevMode}
-              className="studio-input disabled:opacity-80"
-            >
-              {isDevMode && <option value="mock">{t.admin.settings.modeMock}</option>}
-              <option value="orcaslicer">{t.admin.settings.modeOrca}</option>
-            </select>
-          </div>
+          {isDevMode ? (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
+                {t.admin.settings.slicerMode}
+              </label>
+              <select
+                value={form.slicer_mode}
+                onChange={(e) =>
+                  setForm({ ...form, slicer_mode: e.target.value as 'mock' | 'orcaslicer' })
+                }
+                className="studio-input"
+              >
+                <option value="mock">{t.admin.settings.modeMock}</option>
+                <option value="orcaslicer">{t.admin.settings.modeOrca}</option>
+              </select>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between rounded-xl bg-emerald-500/10 px-3 py-2 text-xs">
+              <span className="font-medium text-emerald-800 dark:text-emerald-300">
+                {t.admin.settings.modeBadgeOrca}
+              </span>
+              <span className="text-[11px] text-emerald-700/80 dark:text-emerald-300/80">
+                {t.admin.settings.prodModeFixed}
+              </span>
+            </div>
+          )}
           <div>
             <label className="mb-1.5 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
               {t.admin.settings.orcaCliPath}
             </label>
-            <input
-              type="text"
-              value={form.orca_cli_path}
-              onChange={(e) => setForm({ ...form, orca_cli_path: e.target.value })}
-              className="studio-input font-mono text-xs"
-            />
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                type="text"
+                value={form.orca_cli_path}
+                onChange={(e) => setForm({ ...form, orca_cli_path: e.target.value })}
+                className="studio-input flex-1 font-mono text-xs"
+              />
+              <button
+                type="button"
+                disabled={testingOrca || !form.orca_cli_path.trim()}
+                onClick={() => void handleTestOrca()}
+                className="btn-secondary shrink-0 px-3 py-2 text-xs"
+              >
+                {testingOrca ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Plug className="h-3.5 w-3.5" />
+                )}
+                {testingOrca ? t.admin.settings.testingOrca : t.admin.settings.testOrcaBtn}
+              </button>
+            </div>
+            {orcaTest && (
+              <div
+                className={`mt-2 flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium ${
+                  orcaTest.ok
+                    ? 'bg-emerald-500/12 text-emerald-800 dark:text-emerald-300'
+                    : 'bg-rose-500/12 text-rose-800 dark:text-rose-300'
+                }`}
+              >
+                {orcaTest.ok ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                ) : (
+                  <XCircle className="h-4 w-4 shrink-0" />
+                )}
+                <span>
+                  {orcaTest.ok ? t.admin.settings.orcaTestOk : t.admin.settings.orcaTestFail}
+                  {orcaTest.version ? ` · ${orcaTest.version}` : ''}
+                  {orcaTest.detail ? ` — ${orcaTest.detail}` : ''}
+                </span>
+              </div>
+            )}
+          </div>
+          <div>
+            <label
+              htmlFor="max-concurrent-slices"
+              className="mb-1.5 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]"
+            >
+              {t.admin.settings.maxConcurrentSlices}
+            </label>
+            <select
+              id="max-concurrent-slices"
+              value={form.max_concurrent_slices ?? 2}
+              onChange={(e) =>
+                setForm({ ...form, max_concurrent_slices: Number(e.target.value) })
+              }
+              className="studio-input font-mono text-xs tabular-nums"
+            >
+              {[1, 2, 3, 4].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
 
@@ -312,25 +471,35 @@ export function AdminSettingsTab({
           <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
             {t.admin.settings.fdmTitle}
           </h2>
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
-              {t.admin.settings.fdmMode}
-            </label>
-            <select
-              value={isDevMode ? form.fdm_monster_mode : 'live'}
-              onChange={(e) =>
-                setForm({
-                  ...form,
-                  fdm_monster_mode: e.target.value as 'mock' | 'live',
-                })
-              }
-              disabled={!isDevMode}
-              className="studio-input disabled:opacity-80"
-            >
-              {isDevMode && <option value="mock">{t.admin.settings.modeMock}</option>}
-              <option value="live">{t.admin.settings.modeLive}</option>
-            </select>
-          </div>
+          {isDevMode ? (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
+                {t.admin.settings.fdmMode}
+              </label>
+              <select
+                value={form.fdm_monster_mode}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    fdm_monster_mode: e.target.value as 'mock' | 'live',
+                  })
+                }
+                className="studio-input"
+              >
+                <option value="mock">{t.admin.settings.modeMock}</option>
+                <option value="live">{t.admin.settings.modeLive}</option>
+              </select>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between rounded-xl bg-emerald-500/10 px-3 py-2 text-xs">
+              <span className="font-medium text-emerald-800 dark:text-emerald-300">
+                {t.admin.settings.modeBadgeLive}
+              </span>
+              <span className="text-[11px] text-emerald-700/80 dark:text-emerald-300/80">
+                {t.admin.settings.prodModeFixed}
+              </span>
+            </div>
+          )}
           <div>
             <label className="mb-1.5 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
               {t.admin.settings.fdmUrl}
@@ -447,6 +616,8 @@ export function AdminSettingsTab({
           </div>
         )}
       </div>
+      </>
+      )}
 
       <div className="flex items-center justify-end gap-3">
         {savedToast && (
@@ -464,7 +635,7 @@ export function AdminSettingsTab({
     )}
 
     {/* Software Version & On-Demand Updates */}
-    {canManageUpdates && (
+    {canManageUpdates && effectiveSubTab === 'updates' && (
     <div className="studio-surface space-y-4 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>

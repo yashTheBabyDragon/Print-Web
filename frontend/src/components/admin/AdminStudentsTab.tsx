@@ -41,11 +41,14 @@ interface AdminStudentsTabProps {
   students: StudentAccount[];
   accountRequests?: PendingAccountRequest[];
   isSuperAdmin: boolean;
+  canAdjustQuotas?: boolean;
+  canResetPasswords?: boolean;
+  onOpenApprovals?: () => void;
   onReload: () => Promise<void>;
   onError: (msg: string) => void;
 }
 
-type WorkspaceView = 'class' | 'all' | 'requests';
+type WorkspaceView = 'class' | 'all';
 type RosterFilter = 'all' | 'registered' | 'unclaimed';
 
 export function AdminStudentsTab({
@@ -54,6 +57,9 @@ export function AdminStudentsTab({
   students,
   accountRequests = [],
   isSuperAdmin,
+  canAdjustQuotas = true,
+  canResetPasswords = true,
+  onOpenApprovals,
   onReload,
   onError,
 }: AdminStudentsTabProps) {
@@ -112,10 +118,6 @@ export function AdminStudentsTab({
     >
   >({});
   const [savingStudentId, setSavingStudentId] = useState<number | null>(null);
-
-  // Pending account requests inline approval
-  const [busyAccountId, setBusyAccountId] = useState<number | null>(null);
-  const [requestClassSelections, setRequestClassSelections] = useState<Record<number, string>>({});
 
   const filteredClasses = useMemo(() => {
     if (!isSuperAdmin || teacherFilter === 'all') return classes;
@@ -381,28 +383,6 @@ export function AdminStudentsTab({
     }
   };
 
-  const handleAccountDecision = async (
-    req: PendingAccountRequest,
-    decision: 'approve' | 'reject'
-  ) => {
-    setBusyAccountId(req.id);
-    setNotice(null);
-    try {
-      const defaultClassId =
-        selectedClass && !selectedClass.is_default_individual ? String(selectedClass.id) : '';
-      const chosen = requestClassSelections[req.id] ?? defaultClassId;
-      await api.adminDecideAccountRequest(req.id, {
-        decision,
-        class_id: chosen ? Number(chosen) : null,
-      });
-      await onReload();
-    } catch (err) {
-      onError(translateApiError(err, t));
-    } finally {
-      setBusyAccountId(null);
-    }
-  };
-
   const enrolledCount = selectedClass
     ? (selectedClass.enrolled_count ?? selectedClass.enrollments.length)
     : 0;
@@ -448,7 +428,7 @@ export function AdminStudentsTab({
             </button>
           </div>
 
-          {isSuperAdmin && teachers.length > 0 && (
+          {isSuperAdmin && teachers.filter((tc) => tc.role !== 'admin' || tc.class_count > 0).length > 0 && (
             <div>
               <select
                 aria-label={t.admin.students.classTeacherLabel}
@@ -457,16 +437,18 @@ export function AdminStudentsTab({
                 className="studio-input py-1.5 text-xs"
               >
                 <option value="all">{t.admin.students.allTeachersFilter}</option>
-                {teachers.map((tc) => (
-                  <option key={tc.id} value={String(tc.id)}>
-                    {tc.name}
-                  </option>
-                ))}
+                {teachers
+                  .filter((tc) => tc.role !== 'admin' || tc.class_count > 0)
+                  .map((tc) => (
+                    <option key={tc.id} value={String(tc.id)}>
+                      {tc.name}
+                    </option>
+                  ))}
               </select>
             </div>
           )}
 
-          {/* Quick Views: All Students & Pending Requests */}
+          {/* Quick View: All Students */}
           <div className="space-y-1.5">
             <button
               type="button"
@@ -485,26 +467,6 @@ export function AdminStudentsTab({
                 {students.length}
               </span>
             </button>
-
-            {accountRequests.length > 0 && (
-              <button
-                type="button"
-                onClick={() => setView('requests')}
-                className={`flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left text-xs font-medium transition-all ${
-                  view === 'requests'
-                    ? 'border-amber-500 bg-amber-500/10 text-amber-900 shadow-sm dark:text-amber-200'
-                    : 'border-amber-500/30 bg-amber-500/5 text-amber-800 hover:bg-amber-500/10 dark:text-amber-300'
-                }`}
-              >
-                <span className="flex items-center gap-2">
-                  <UserCheck className="h-3.5 w-3.5" />
-                  <span>{t.admin.students.accountRequestsBadge}</span>
-                </span>
-                <span className="rounded-full bg-amber-500 px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums text-slate-950">
-                  {accountRequests.length}
-                </span>
-              </button>
-            )}
           </div>
 
           {/* Class List */}
@@ -572,105 +534,6 @@ export function AdminStudentsTab({
 
         {/* Right Detail Workspace */}
         <div className="min-w-0 space-y-4 lg:col-span-8 xl:col-span-9">
-          {/* Pending Account Requests View */}
-          {view === 'requests' && (
-            <div className="studio-surface overflow-hidden">
-              <div className="border-b border-black/[0.06] px-5 py-4 dark:border-white/[0.07]">
-                <h3 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
-                  {t.admin.accountRequests.title} ({accountRequests.length})
-                </h3>
-                <p className="mt-0.5 text-xs text-[#5B616E] dark:text-[#9399A6]">
-                  {t.admin.accountRequests.subtitle}
-                </p>
-              </div>
-              {accountRequests.length === 0 ? (
-                <div className="p-10 text-center text-sm text-[#5B616E] dark:text-[#9399A6]">
-                  {t.admin.accountRequests.noRequests}
-                </div>
-              ) : (
-                <div className="divide-y divide-black/[0.06] dark:divide-white/[0.07]">
-                  {accountRequests.map((req) => {
-                    const isBusy = busyAccountId === req.id;
-                    const teacherClasses = (
-                      req.requested_teacher_id != null
-                        ? classes.filter((c) => c.teacher_id === req.requested_teacher_id)
-                        : classes
-                    ).filter((c) => !c.is_default_individual);
-                    const defaultVal =
-                      selectedClass && !selectedClass.is_default_individual
-                        ? String(selectedClass.id)
-                        : '';
-                    const selectedVal = requestClassSelections[req.id] ?? defaultVal;
-
-                    return (
-                      <div
-                        key={req.id}
-                        className="flex flex-wrap items-center justify-between gap-4 px-5 py-4"
-                      >
-                        <div className="space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-sm font-semibold text-[#111318] dark:text-[#F4F5F7]">
-                              {req.name}
-                            </span>
-                            <span className="studio-subtle px-2 py-0.5 font-mono text-xs tabular-nums text-[#5B616E] dark:text-[#9399A6]">
-                              {req.da}
-                            </span>
-                            {req.requested_teacher_name && (
-                              <span className="rounded-full bg-[#00A7D9]/12 px-2 py-0.5 text-[11px] font-medium text-[#007BA3] dark:text-[#38C6F4]">
-                                {req.requested_teacher_name}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-2">
-                          <select
-                            aria-label={t.admin.accountRequests.targetClassLabel}
-                            value={selectedVal}
-                            disabled={isBusy}
-                            onChange={(e) =>
-                              setRequestClassSelections((prev) => ({
-                                ...prev,
-                                [req.id]: e.target.value,
-                              }))
-                            }
-                            className="studio-input w-auto py-1.5 text-xs"
-                          >
-                            <option value="">{t.admin.accountRequests.defaultIndividualOption}</option>
-                            {teacherClasses.map((cls) => (
-                              <option key={cls.id} value={String(cls.id)}>
-                                {cls.name}
-                                {cls.code ? ` (${cls.code})` : ''}
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => handleAccountDecision(req, 'reject')}
-                            className="btn-danger py-1.5 text-xs"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                            {t.admin.accountRequests.rejectBtn}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() => handleAccountDecision(req, 'approve')}
-                            className="btn-primary py-1.5 text-xs"
-                          >
-                            <Check className="h-3.5 w-3.5" />
-                            {t.admin.accountRequests.approveBtn}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
           {/* All Students View */}
           {view === 'all' && (() => {
             const visibleAllIds = filteredAllStudents.map((s) => s.id);
@@ -844,6 +707,7 @@ export function AdminStudentsTab({
                               <input
                                 type="number"
                                 step="1"
+                                disabled={!canAdjustQuotas}
                                 value={d.maxGrams}
                                 placeholder={t.admin.students.globalDefaultPlaceholder}
                                 onChange={(e) =>
@@ -852,13 +716,14 @@ export function AdminStudentsTab({
                                     [s.id]: { ...d, maxGrams: e.target.value },
                                   }))
                                 }
-                                className="studio-input w-24 py-1 font-mono text-xs tabular-nums"
+                                className="studio-input w-24 py-1 font-mono text-xs tabular-nums disabled:opacity-60"
                               />
                             </td>
                             <td className="px-3 py-3">
                               <input
                                 type="number"
                                 step="10"
+                                disabled={!canAdjustQuotas}
                                 value={d.maxMinutes}
                                 placeholder={t.admin.students.globalDefaultPlaceholder}
                                 onChange={(e) =>
@@ -867,7 +732,7 @@ export function AdminStudentsTab({
                                     [s.id]: { ...d, maxMinutes: e.target.value },
                                   }))
                                 }
-                                className="studio-input w-24 py-1 font-mono text-xs tabular-nums"
+                                className="studio-input w-24 py-1 font-mono text-xs tabular-nums disabled:opacity-60"
                               />
                             </td>
                             <td className="px-3 py-3">
@@ -903,6 +768,7 @@ export function AdminStudentsTab({
                                   <Save className="h-3 w-3" />
                                   {t.common.save}
                                 </button>
+                                {canAdjustQuotas && (
                                 <button
                                   type="button"
                                   title={t.admin.students.refreshBudgetBtn}
@@ -918,6 +784,8 @@ export function AdminStudentsTab({
                                 >
                                   <RotateCcw className="h-3.5 w-3.5" />
                                 </button>
+                                )}
+                                {canResetPasswords && (
                                 <button
                                   type="button"
                                   title={t.admin.students.resetPasswordBtn}
@@ -927,6 +795,7 @@ export function AdminStudentsTab({
                                 >
                                   <KeyRound className="h-3.5 w-3.5" />
                                 </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -960,8 +829,8 @@ export function AdminStudentsTab({
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {/* Pending requests compact banner */}
-                  {accountRequests.length > 0 && (
+                  {/* Pending requests compact banner linking to Approvals */}
+                  {accountRequests.length > 0 && onOpenApprovals && (
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/25 bg-amber-500/8 px-4 py-2.5 text-xs">
                       <div className="flex items-center gap-2 font-medium text-amber-800 dark:text-amber-200">
                         <UserCheck className="h-4 w-4 text-amber-600 dark:text-amber-400" />
@@ -974,10 +843,10 @@ export function AdminStudentsTab({
                       </div>
                       <button
                         type="button"
-                        onClick={() => setView('requests')}
+                        onClick={onOpenApprovals}
                         className="font-semibold text-amber-800 underline hover:text-amber-950 dark:text-amber-300 dark:hover:text-amber-100"
                       >
-                        {t.admin.accountRequests.approveBtn}
+                        {t.admin.tabs.approvals}
                       </button>
                     </div>
                   )}
@@ -1216,7 +1085,7 @@ export function AdminStudentsTab({
                       </div>
                     </div>
 
-                    {selectedStudentIds.length > 0 && (
+                    {canAdjustQuotas && selectedStudentIds.length > 0 && (
                       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#00A7D9]/20 bg-[#00A7D9]/[0.07] px-5 py-2.5 text-xs">
                         <span className="font-medium text-[#007BA3] dark:text-[#38C6F4]">
                           {t.admin.students.selectedCount.replace(
@@ -1384,6 +1253,7 @@ export function AdminStudentsTab({
                                         <input
                                           type="number"
                                           step="1"
+                                          disabled={!canAdjustQuotas}
                                           value={d.maxGrams}
                                           placeholder={t.admin.students.globalDefaultPlaceholder}
                                           onChange={(e) =>
@@ -1392,7 +1262,7 @@ export function AdminStudentsTab({
                                               [account.id]: { ...d, maxGrams: e.target.value },
                                             }))
                                           }
-                                          className="studio-input w-24 py-1 font-mono text-xs tabular-nums"
+                                          className="studio-input w-24 py-1 font-mono text-xs tabular-nums disabled:opacity-60"
                                         />
                                       ) : (
                                         <span className="font-mono text-[#5B616E] dark:text-[#9399A6]">
@@ -1407,6 +1277,7 @@ export function AdminStudentsTab({
                                         <input
                                           type="number"
                                           step="10"
+                                          disabled={!canAdjustQuotas}
                                           value={d.maxMinutes}
                                           placeholder={t.admin.students.globalDefaultPlaceholder}
                                           onChange={(e) =>
@@ -1415,7 +1286,7 @@ export function AdminStudentsTab({
                                               [account.id]: { ...d, maxMinutes: e.target.value },
                                             }))
                                           }
-                                          className="studio-input w-24 py-1 font-mono text-xs tabular-nums"
+                                          className="studio-input w-24 py-1 font-mono text-xs tabular-nums disabled:opacity-60"
                                         />
                                       ) : (
                                         <span className="font-mono text-[#5B616E] dark:text-[#9399A6]">
@@ -1441,7 +1312,7 @@ export function AdminStudentsTab({
                                             <Save className="h-3.5 w-3.5" />
                                           </button>
                                         )}
-                                        {account && (
+                                        {account && canAdjustQuotas && (
                                           <button
                                             type="button"
                                             title={t.admin.students.refreshBudgetBtn}
@@ -1458,7 +1329,7 @@ export function AdminStudentsTab({
                                             <RotateCcw className="h-3.5 w-3.5" />
                                           </button>
                                         )}
-                                        {account && (
+                                        {account && canResetPasswords && (
                                           <button
                                             type="button"
                                             title={t.admin.students.resetPasswordBtn}

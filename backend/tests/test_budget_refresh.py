@@ -72,7 +72,7 @@ def _submit_job(client: TestClient, token: str, filename: str = "box.stl") -> di
     assert up.status_code == 201, up.text
     job_id = up.json()["id"]
     sl = client.post(
-        f"/api/jobs/{job_id}/slice",
+        f"/api/jobs/{job_id}/slice?sync=true",
         headers=_auth(token),
         json={
             "printer_id": p["id"],

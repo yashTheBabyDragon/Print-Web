@@ -79,7 +79,7 @@ def _upload_draft(
 
 def _slice_draft(client: TestClient, token: str, job_id: int, printer_id: int, slot_id: int) -> dict:
     resp = client.post(
-        f"/api/jobs/{job_id}/slice",
+        f"/api/jobs/{job_id}/slice?sync=true",
         headers=_auth_header(token),
         json={
             "printer_id": printer_id,

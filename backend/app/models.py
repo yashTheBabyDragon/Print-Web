@@ -27,7 +27,10 @@ def utcnow() -> datetime:
 
 class JobStatus(str, enum.Enum):
     DRAFT = "DRAFT"
+    SLICING_QUEUED = "SLICING_QUEUED"
+    SLICING = "SLICING"
     SLICED = "SLICED"
+    SLICE_FAILED = "SLICE_FAILED"
     PENDING_APPROVAL = "PENDING_APPROVAL"
     QUEUED = "QUEUED"
     PRINTING = "PRINTING"
@@ -85,6 +88,10 @@ class SystemSettings(Base):
     orca_cli_path: Mapped[str] = mapped_column(String(255), default="orca-slicer", nullable=False)
     filament_api_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     filament_api_url: Mapped[str] = mapped_column(String(255), default="http://filament-api:8000", nullable=False)
+    setup_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    setup_token_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    setup_token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_concurrent_slices: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
@@ -110,6 +117,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), default="student", nullable=False)
+    hierarchy_rank: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
     approval_status: Mapped[str] = mapped_column(String(20), default="approved", nullable=False)
     requested_teacher_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -242,6 +250,7 @@ class Printer(Base):
     status: Mapped[str] = mapped_column(String(32), default=PrinterStatus.IDLE.value, nullable=False)
     queue_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_manual: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     bed_x_mm: Mapped[float] = mapped_column(Float, default=250.0, nullable=False)
     bed_y_mm: Mapped[float] = mapped_column(Float, default=210.0, nullable=False)
     bed_z_mm: Mapped[float] = mapped_column(Float, default=220.0, nullable=False)
@@ -311,8 +320,10 @@ class PrintJob(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     original_stl_path: Mapped[str] = mapped_column(String(500), nullable=False)
     oriented_stl_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    preview_stl_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     sliced_output_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     gcode_filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    slice_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     pos_x_mm: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     pos_y_mm: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

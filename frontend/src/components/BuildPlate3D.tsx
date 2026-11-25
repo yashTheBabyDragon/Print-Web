@@ -177,6 +177,84 @@ function NumericInput({
 }
 
 const _tmpBoxVec = new THREE.Vector3();
+const MAX_EXACT_BOUNDS_VERTS = 25000;
+const BOUNDS_SAMPLE_LIMIT = 12000;
+
+function extractFastBoundsVertices(geometry: THREE.BufferGeometry): THREE.Vector3[] {
+  const posAttr = geometry.getAttribute('position');
+  if (!posAttr || posAttr.count === 0) return [];
+
+  const count = posAttr.count;
+  if (count <= MAX_EXACT_BOUNDS_VERTS) {
+    const seen = new Map<string, THREE.Vector3>();
+    for (let i = 0; i < count; i++) {
+      const x = posAttr.getX(i);
+      const y = posAttr.getY(i);
+      const z = posAttr.getZ(i);
+      const key = `${Math.round(x * 1e4)},${Math.round(y * 1e4)},${Math.round(z * 1e4)}`;
+      if (!seen.has(key)) {
+        seen.set(key, new THREE.Vector3(x, y, z));
+      }
+    }
+    return Array.from(seen.values());
+  }
+
+  // 26 directional extrema (6 axes + 12 edge diagonals + 8 corner diagonals) preserve tight bounds on huge meshes
+  const dirs: Array<[number, number, number]> = [
+    [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
+    [1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0],
+    [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1],
+    [0, 1, 1], [0, 1, -1], [0, -1, 1], [0, -1, -1],
+    [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+    [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1],
+  ];
+  const bestDot = new Float64Array(dirs.length).fill(-Infinity);
+  const bestIdx = new Int32Array(dirs.length).fill(0);
+
+  for (let i = 0; i < count; i++) {
+    const x = posAttr.getX(i);
+    const y = posAttr.getY(i);
+    const z = posAttr.getZ(i);
+    for (let d = 0; d < dirs.length; d++) {
+      const [dx, dy, dz] = dirs[d];
+      const dot = x * dx + y * dy + z * dz;
+      if (dot > bestDot[d]) {
+        bestDot[d] = dot;
+        bestIdx[d] = i;
+      }
+    }
+  }
+
+  const picked = new Set<number>();
+  for (let d = 0; d < bestIdx.length; d++) {
+    picked.add(bestIdx[d]);
+  }
+  const stride = Math.max(1, Math.floor(count / BOUNDS_SAMPLE_LIMIT));
+  for (let i = 0; i < count; i += stride) {
+    picked.add(i);
+  }
+
+  const out: THREE.Vector3[] = [];
+  picked.forEach((idx) => {
+    out.push(new THREE.Vector3(posAttr.getX(idx), posAttr.getY(idx), posAttr.getZ(idx)));
+  });
+  return out;
+}
+
+function disposeObject3D(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    const meshLike = obj as THREE.Mesh | THREE.Line | THREE.LineSegments;
+    if (meshLike.geometry && typeof meshLike.geometry.dispose === 'function') {
+      meshLike.geometry.dispose();
+    }
+    const mat = meshLike.material as THREE.Material | THREE.Material[] | undefined;
+    if (Array.isArray(mat)) {
+      for (const m of mat) m?.dispose();
+    } else if (mat && typeof mat.dispose === 'function') {
+      mat.dispose();
+    }
+  });
+}
 
 function computeExactWorldBox(
   mesh: THREE.Mesh,
@@ -270,10 +348,17 @@ export function BuildPlate3D({
 
   const isDraggingGizmoRef = useRef(false);
   const lastBuiltScaleRef = useRef(1.0);
+  const boundsVertsRef = useRef<THREE.Vector3[]>([]);
+  const meshCenterOffsetRef = useRef(new THREE.Vector3());
+  const layBuiltKeyRef = useRef<string | null>(null);
+  const requestRenderRef = useRef<() => void>(() => {});
+  const requestShadowUpdateRef = useRef<() => void>(() => {});
 
   const [activeTool, setActiveTool] = useState<ToolMode | null>('move');
   const activeToolRef = useRef<ToolMode | null>(activeTool);
   activeToolRef.current = activeTool;
+  const [loadedMeshSeq, setLoadedMeshSeq] = useState(0);
+  const [buildingLayOverlay, setBuildingLayOverlay] = useState(false);
 
   const [overlayOpen, setOverlayOpen] = useState(true);
   const [dragOverCanvas, setDragOverCanvas] = useState(false);
@@ -296,6 +381,8 @@ export function BuildPlate3D({
   const [currentLayer, setCurrentLayer] = useState(1);
   const [currentMove, setCurrentMove] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
   const [colorMode, setColorMode] = useState<PreviewColorMode>('line-type');
   const [hiddenFeatures, setHiddenFeatures] = useState<Set<GcodeFeatureType>>(() => new Set());
   const [showTravels, setShowTravels] = useState(false);
@@ -335,7 +422,8 @@ export function BuildPlate3D({
 
   const getExactMeshBox = useCallback((mesh: THREE.Mesh) => {
     const hullVerts = layOverlayRef.current?.getHullLocalVertices() ?? [];
-    return computeExactWorldBox(mesh, hullVerts);
+    const verts = hullVerts.length > 0 ? hullVerts : boundsVertsRef.current;
+    return computeExactWorldBox(mesh, verts);
   }, []);
 
   const syncPivotTransform = useCallback(
@@ -371,6 +459,8 @@ export function BuildPlate3D({
       ) {
         scaleGizmoRef.current.updateFromBox(finalBox, cameraRef.current);
       }
+
+      requestShadowUpdateRef.current();
     },
     [evaluateBoundsFromBox, getExactMeshBox]
   );
@@ -437,6 +527,7 @@ export function BuildPlate3D({
       tc.showY = true;
       tc.showZ = true;
     }
+    requestRenderRef.current();
   }, [getExactMeshBox]);
 
   useEffect(() => {
@@ -473,6 +564,8 @@ export function BuildPlate3D({
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(width, height);
     renderer.shadowMap.enabled = true;
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.02;
@@ -545,12 +638,68 @@ export function BuildPlate3D({
     scene.add(transformControls.getHelper());
     transformControlsRef.current = transformControls;
 
+    let animId = 0;
+    let isDisposed = false;
+    let isInRenderFrame = false;
+
+    const renderFrame = () => {
+      animId = 0;
+      if (isDisposed) return;
+
+      isInRenderFrame = true;
+      const cameraMoved = controls.update();
+      isInRenderFrame = false;
+
+      if (
+        workspaceModeRef.current === 'prepare' &&
+        activeToolRef.current === 'scale' &&
+        meshRef.current &&
+        scaleGizmo.group.visible &&
+        !scaleGizmo.isDragging
+      ) {
+        pivotGroup.updateMatrixWorld(true);
+        const box = getExactMeshBox(meshRef.current);
+        if (!box.isEmpty()) {
+          scaleGizmo.updateFromBox(box, camera);
+        }
+      }
+
+      renderer.render(scene, camera);
+
+      if (cameraMoved || isDraggingGizmoRef.current || isPlayingRef.current) {
+        requestRender();
+      }
+    };
+
+    const requestRender = () => {
+      if (isDisposed || animId !== 0) return;
+      animId = requestAnimationFrame(renderFrame);
+    };
+
+    const requestShadowUpdate = () => {
+      renderer.shadowMap.needsUpdate = true;
+      requestRender();
+    };
+
+    requestRenderRef.current = requestRender;
+    requestShadowUpdateRef.current = requestShadowUpdate;
+
+    const onControlsChange = () => {
+      if (!isInRenderFrame) {
+        requestRender();
+      }
+    };
+    controls.addEventListener('change', onControlsChange);
+    transformControls.addEventListener('change', requestRender);
+
     const onDraggingChanged = (event: { value: unknown }) => {
       const isDragging = Boolean(event.value);
       isDraggingGizmoRef.current = isDragging;
       controls.enabled = !isDragging;
       if (!isDragging) {
         syncPivotTransform(transformRef.current);
+      } else {
+        requestRender();
       }
     };
 
@@ -570,6 +719,7 @@ export function BuildPlate3D({
         const center = new THREE.Vector3();
         finalBox.getCenter(center);
         evaluateBoundsFromBox(finalBox);
+        requestShadowUpdate();
         onTransformChangeRef.current({
           ...transformRef.current,
           posX: Number(center.x.toFixed(1)),
@@ -587,6 +737,7 @@ export function BuildPlate3D({
         const center = new THREE.Vector3();
         finalBox.getCenter(center);
         evaluateBoundsFromBox(finalBox);
+        requestShadowUpdate();
         const q = pivotGroup.quaternion.clone().normalize();
         onTransformChangeRef.current({
           ...transformRef.current,
@@ -609,6 +760,8 @@ export function BuildPlate3D({
     let isDraggingMesh = false;
     const dragOffset = new THREE.Vector2();
     let snapDownPos: { x: number; y: number } | null = null;
+    let prevScaleHover = false;
+    let prevSnapHoverObj: THREE.Object3D | null = null;
 
     const updatePointer = (ev: PointerEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -660,6 +813,7 @@ export function BuildPlate3D({
           controls.enabled = false;
           isDraggingGizmoRef.current = true;
           renderer.domElement.style.cursor = 'grabbing';
+          requestRender();
         }
         return;
       }
@@ -725,6 +879,7 @@ export function BuildPlate3D({
             const finalBox = getExactMeshBox(meshRef.current);
             evaluateBoundsFromBox(finalBox);
             scaleGizmo.updateFromBox(finalBox, camera);
+            requestShadowUpdate();
             onTransformChangeRef.current({
               ...cur,
               scale: Number(nextScale.toFixed(4)),
@@ -757,6 +912,10 @@ export function BuildPlate3D({
       if (activeToolRef.current === 'scale') {
         const hitGizmo = scaleGizmo.isHit(raycaster);
         scaleGizmo.setHovered(hitGizmo);
+        if (hitGizmo !== prevScaleHover) {
+          prevScaleHover = hitGizmo;
+          requestRender();
+        }
         renderer.domElement.style.cursor = hitGizmo ? 'grab' : 'default';
         return;
       }
@@ -764,13 +923,16 @@ export function BuildPlate3D({
       if (activeToolRef.current === 'snap' && layOverlay.group.visible) {
         const hits = raycaster.intersectObjects(layOverlay.getPickables(), false);
         const firstHit = hits[0];
-        if (firstHit && layOverlay.getFacetLocalNormal(firstHit.object) !== null) {
-          layOverlay.setHoveredObject(firstHit.object);
-          renderer.domElement.style.cursor = 'pointer';
-        } else {
-          layOverlay.setHoveredObject(null);
-          renderer.domElement.style.cursor = 'default';
+        const nextHoverObj =
+          firstHit && layOverlay.getFacetLocalNormal(firstHit.object) !== null
+            ? firstHit.object
+            : null;
+        if (nextHoverObj !== prevSnapHoverObj) {
+          prevSnapHoverObj = nextHoverObj;
+          layOverlay.setHoveredObject(nextHoverObj);
+          requestRender();
         }
+        renderer.domElement.style.cursor = nextHoverObj ? 'pointer' : 'default';
         return;
       }
 
@@ -819,6 +981,7 @@ export function BuildPlate3D({
         isDraggingMesh = false;
         controls.enabled = !transformControls.dragging;
         renderer.domElement.style.cursor = 'default';
+        requestRender();
       }
     };
 
@@ -826,26 +989,7 @@ export function BuildPlate3D({
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
 
-    let animId = 0;
-    const animate = () => {
-      animId = requestAnimationFrame(animate);
-      controls.update();
-      if (
-        workspaceModeRef.current === 'prepare' &&
-        activeToolRef.current === 'scale' &&
-        meshRef.current &&
-        scaleGizmo.group.visible &&
-        !scaleGizmo.isDragging
-      ) {
-        pivotGroup.updateMatrixWorld(true);
-        const box = getExactMeshBox(meshRef.current);
-        if (!box.isEmpty()) {
-          scaleGizmo.updateFromBox(box, camera);
-        }
-      }
-      renderer.render(scene, camera);
-    };
-    animate();
+    requestRender();
 
     const observer = new ResizeObserver(() => {
       if (!container) return;
@@ -855,16 +999,22 @@ export function BuildPlate3D({
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
         renderer.setSize(w, h);
+        requestRender();
       }
     });
     observer.observe(container);
 
     return () => {
+      isDisposed = true;
       cancelAnimationFrame(animId);
+      requestRenderRef.current = () => {};
+      requestShadowUpdateRef.current = () => {};
       observer.disconnect();
       renderer.domElement.removeEventListener('pointerdown', onPointerDown, { capture: true });
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
+      controls.removeEventListener('change', onControlsChange);
+      transformControls.removeEventListener('change', requestRender);
       transformControls.removeEventListener('dragging-changed', onDraggingChanged);
       transformControls.removeEventListener('objectChange', onObjectChange);
       transformControls.detach();
@@ -877,6 +1027,15 @@ export function BuildPlate3D({
       pivotGroup.remove(layOverlay.group);
       layOverlay.dispose();
       layOverlayRef.current = null;
+      if (meshRef.current) {
+        pivotGroup.remove(meshRef.current);
+        meshRef.current.geometry.dispose();
+        (meshRef.current.material as THREE.Material).dispose();
+        meshRef.current = null;
+      }
+      boundsVertsRef.current = [];
+      disposeObject3D(bedGroup);
+      bedGroup.clear();
       scene.remove(gcodePreview.group);
       gcodePreview.dispose();
       gcodePreviewRef.current = null;
@@ -900,6 +1059,7 @@ export function BuildPlate3D({
     while (bedGroup.children.length > 0) {
       const child = bedGroup.children.pop()!;
       bedGroup.remove(child);
+      disposeObject3D(child);
     }
 
     // Matte build plate surface
@@ -959,6 +1119,7 @@ export function BuildPlate3D({
     bedGroup.add(frontBar);
 
     syncPivotTransform(transformRef.current);
+    requestShadowUpdateRef.current();
   }, [bedX, bedY, bedZ, theme, syncPivotTransform]);
 
   // Load STL mesh into pivotGroup whenever jobId or meshVersion changes
@@ -972,7 +1133,10 @@ export function BuildPlate3D({
       scaleGizmoRef.current.group.visible = false;
     }
     layOverlayRef.current?.dispose();
+    layBuiltKeyRef.current = null;
+    boundsVertsRef.current = [];
     setFacetCount(0);
+    setBuildingLayOverlay(false);
 
     if (meshRef.current) {
       pivot.remove(meshRef.current);
@@ -986,6 +1150,7 @@ export function BuildPlate3D({
       const zeroBounds = { widthMm: 0, depthMm: 0, heightMm: 0, outOfBounds: false };
       setBounds(zeroBounds);
       onBoundsChangeRef.current?.(zeroBounds);
+      requestShadowUpdateRef.current();
       return;
     }
 
@@ -999,12 +1164,16 @@ export function BuildPlate3D({
 
         const loader = new STLLoader();
         const geometry = loader.parse(buffer);
-        geometry.computeVertexNormals();
+        if (!geometry.getAttribute('normal')) {
+          geometry.computeVertexNormals();
+        }
         geometry.computeBoundingBox();
 
         const rawBox = geometry.boundingBox!;
         const rawCenter = new THREE.Vector3();
         rawBox.getCenter(rawCenter);
+        meshCenterOffsetRef.current.set(-rawCenter.x, -rawCenter.y, -rawCenter.z);
+        boundsVertsRef.current = extractFastBoundsVertices(geometry);
 
         const material = new THREE.MeshStandardMaterial({
           color: new THREE.Color(filamentColor || '#00A7D9'),
@@ -1019,18 +1188,10 @@ export function BuildPlate3D({
         pivot.add(mesh);
         meshRef.current = mesh;
 
-        if (layOverlayRef.current) {
-          layOverlayRef.current.buildFromGeometry(
-            geometry,
-            new THREE.Vector3(-rawCenter.x, -rawCenter.y, -rawCenter.z),
-            transformRef.current.scale
-          );
-          lastBuiltScaleRef.current = transformRef.current.scale;
-          setFacetCount(layOverlayRef.current.facetCount);
-        }
-
+        setLoadedMeshSeq((s) => s + 1);
         syncPivotTransform(transformRef.current);
         configureGizmoForTool(activeToolRef.current);
+        requestShadowUpdateRef.current();
       } catch (err) {
         if (!cancelled) {
           setMeshError(err instanceof Error ? err.message : 'Failed to load 3D mesh');
@@ -1046,22 +1207,82 @@ export function BuildPlate3D({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId, meshVersion]);
 
+  // Lazily build LayOnFaceOverlay ONLY when user activates the 'snap' (F) tool
+  useEffect(() => {
+    const mesh = meshRef.current;
+    const layOverlay = layOverlayRef.current;
+    if (
+      workspaceMode !== 'prepare' ||
+      activeTool !== 'snap' ||
+      !jobId ||
+      !mesh ||
+      !layOverlay
+    ) {
+      setBuildingLayOverlay(false);
+      return;
+    }
+
+    const meshKey = `${jobId}:${meshVersion}:${loadedMeshSeq}`;
+    if (layBuiltKeyRef.current === meshKey) {
+      return;
+    }
+
+    let cancelled = false;
+    const posAttr = mesh.geometry.getAttribute('position');
+    const isHeavy = Boolean(posAttr && posAttr.count > 40000);
+    if (isHeavy) {
+      setBuildingLayOverlay(true);
+    }
+
+    const runBuild = () => {
+      if (cancelled || !meshRef.current || !layOverlayRef.current) return;
+      layOverlayRef.current.buildFromGeometry(
+        meshRef.current.geometry,
+        meshCenterOffsetRef.current,
+        transformRef.current.scale
+      );
+      lastBuiltScaleRef.current = transformRef.current.scale;
+      layBuiltKeyRef.current = meshKey;
+      setFacetCount(layOverlayRef.current.facetCount);
+      setBuildingLayOverlay(false);
+      configureGizmoForTool('snap');
+      requestRenderRef.current();
+    };
+
+    if (isHeavy) {
+      const timerId = window.setTimeout(runBuild, 16);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(timerId);
+        setBuildingLayOverlay(false);
+      };
+    }
+
+    runBuild();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTool, workspaceMode, jobId, meshVersion, loadedMeshSeq, configureGizmoForTool]);
+
   useEffect(() => {
     const mesh = meshRef.current;
     if (!mesh) return;
     const mat = mesh.material as THREE.MeshStandardMaterial;
     mat.color.set(filamentColor || '#00A7D9');
+    requestRenderRef.current();
   }, [filamentColor]);
 
   useEffect(() => {
     if (
       meshRef.current &&
       layOverlayRef.current &&
+      layBuiltKeyRef.current !== null &&
       Math.abs(transform.scale - lastBuiltScaleRef.current) > 1e-4
     ) {
       layOverlayRef.current.rebuildForScale(transform.scale);
       lastBuiltScaleRef.current = transform.scale;
       setFacetCount(layOverlayRef.current.facetCount);
+      requestRenderRef.current();
     }
   }, [transform.scale]);
 
@@ -1087,6 +1308,7 @@ export function BuildPlate3D({
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
         renderer.setSize(w, h);
+        requestRenderRef.current();
       }
     });
     return () => cancelAnimationFrame(rafId);
@@ -1107,6 +1329,7 @@ export function BuildPlate3D({
       setIsPlaying(false);
     }
     configureGizmoForTool(isPrepare ? activeToolRef.current : null);
+    requestRenderRef.current();
   }, [workspaceMode, configureGizmoForTool]);
 
   // Load & parse sliced G-code whenever jobId or sliceVersion changes (cached across tab switches)
@@ -1195,6 +1418,7 @@ export function BuildPlate3D({
       } finally {
         if (!cancelled) {
           setLoadingPreview(false);
+          requestRenderRef.current();
         }
       }
     })();
@@ -1208,11 +1432,13 @@ export function BuildPlate3D({
   // Sync preview color mode & filament color
   useEffect(() => {
     gcodePreviewRef.current?.setColorMode(colorMode, filamentColor);
+    requestRenderRef.current();
   }, [colorMode, filamentColor]);
 
   // Sync hidden feature toggles & travel visibility
   useEffect(() => {
     gcodePreviewRef.current?.setVisibleFeatures(hiddenFeatures, showTravels);
+    requestRenderRef.current();
   }, [hiddenFeatures, showTravels]);
 
   // Sync active layer & move draw range
@@ -1222,6 +1448,7 @@ export function BuildPlate3D({
     const maxMoves = parsedGcode.layers[layerIdx].moveCount;
     const clampedMove = Math.max(0, Math.min(maxMoves, currentMove));
     gcodePreviewRef.current?.setRange(layerIdx, clampedMove, isPlaying || clampedMove < maxMoves);
+    requestRenderRef.current();
   }, [parsedGcode, currentLayer, currentMove, isPlaying]);
 
   // Playback animation loop for bottom move scrubber
@@ -1431,6 +1658,7 @@ export function BuildPlate3D({
     cameraRef.current.position.set(bedX * 0.92, -bedY * 1.12, Math.max(bedZ * 0.72, 165));
     controlsRef.current.target.set(0, 0, 22);
     controlsRef.current.update();
+    requestRenderRef.current();
   };
 
   const handleCenter = () => {
@@ -2068,10 +2296,19 @@ export function BuildPlate3D({
               {activeTool === 'snap' && (
                 <div className="flex flex-wrap items-center gap-3 text-xs font-medium text-[#111318] dark:text-[#F4F5F7]">
                   <div className="flex items-center gap-2">
-                    <Magnet className="h-4 w-4 shrink-0 text-[#00A7D9]" />
-                    <span>
-                      {t.workspace.toolbar.snapFaceActive.replace('{count}', String(facetCount))}
-                    </span>
+                    {buildingLayOverlay ? (
+                      <>
+                        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#00A7D9]" />
+                        <span>{t.workspace.toolbar.snapBuilding}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Magnet className="h-4 w-4 shrink-0 text-[#00A7D9]" />
+                        <span>
+                          {t.workspace.toolbar.snapFaceActive.replace('{count}', String(facetCount))}
+                        </span>
+                      </>
+                    )}
                   </div>
                   {onReorient && (
                     <button

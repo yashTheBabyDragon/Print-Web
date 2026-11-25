@@ -3,6 +3,9 @@ import { useI18n } from '../i18n';
 
 const JOB_DOT_CLASSES: Record<JobStatus, string> = {
   DRAFT: 'bg-[#8A909E]',
+  SLICING_QUEUED: 'bg-amber-500',
+  SLICING: 'bg-[#00A7D9] animate-pulse',
+  SLICE_FAILED: 'bg-rose-500',
   SLICED: 'bg-[#00A7D9]',
   PENDING_APPROVAL: 'bg-amber-500',
   QUEUED: 'bg-[#00A7D9]',
@@ -15,6 +18,9 @@ const JOB_DOT_CLASSES: Record<JobStatus, string> = {
 
 const JOB_TEXT_CLASSES: Record<JobStatus, string> = {
   DRAFT: 'text-[#5B616E] dark:text-[#9399A6]',
+  SLICING_QUEUED: 'text-amber-700 dark:text-amber-400',
+  SLICING: 'text-[#007BA3] dark:text-[#38C6F4]',
+  SLICE_FAILED: 'text-rose-700 dark:text-rose-400',
   SLICED: 'text-[#007BA3] dark:text-[#38C6F4]',
   PENDING_APPROVAL: 'text-amber-700 dark:text-amber-400',
   QUEUED: 'text-[#007BA3] dark:text-[#38C6F4]',

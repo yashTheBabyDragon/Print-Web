@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -30,6 +31,7 @@ from app.schemas import (
     JobDetail,
     MyJobsResponse,
     RequestApprovalBody,
+    SliceQueueStatsOut,
     TransformPayload,
 )
 from app.services.budget import (
@@ -47,11 +49,14 @@ from app.services.filament_api import sync_printer_filament
 from app.services.notifications import notify_job_completed
 from app.services.profiles import read_upload_bounded
 from app.services.serializers import serialize_job
+from app.services.slice_queue import SliceQueueFullError, SliceTask, slice_queue
 from app.services.slicer import (
+    MockTrimeshSlicer,
     OutOfBoundsError,
     SlicerError,
+    _validate_bed_bounds,
+    generate_preview_stl,
     run_auto_orient,
-    run_slice,
 )
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -94,8 +99,8 @@ def _load_job_for_read(db: Session, job_id: int, user: User) -> PrintJob:
     job = _fetch_job_by_id(db, job_id)
     can_access = (
         job.user_id == user.id
-        or has_permission(user, Permission.APPROVALS_MANAGE_ALL)
-        or (has_permission(user, Permission.APPROVALS_MANAGE_OWN) and job.teacher_id == user.id)
+        or has_permission(user, Permission.APPROVALS_JOBS_ALL)
+        or (has_permission(user, Permission.APPROVALS_JOBS_OWN) and job.teacher_id == user.id)
     )
     if not can_access:
         raise HTTPException(
@@ -177,6 +182,9 @@ async def upload_stl_job(
             detail={"code": "INVALID_STL", "message": str(exc)},
         ) from exc
 
+    preview_path = job_dir / "preview.stl"
+    has_preview = generate_preview_stl(oriented_path, preview_path)
+
     job = PrintJob(
         user_id=current_user.id,
         printer_id=printer.id,
@@ -186,6 +194,7 @@ async def upload_stl_job(
         original_filename=filename,
         original_stl_path=str(original_path),
         oriented_stl_path=str(oriented_path),
+        preview_stl_path=str(preview_path) if has_preview else None,
         pos_x_mm=0.0,
         pos_y_mm=0.0,
         quat_x=0.0,
@@ -218,13 +227,24 @@ def reorient_job(
     """Re-run server auto-orient on original.stl and reset transform to centered identity."""
     sys_settings = get_system_settings(db)
     job = _load_job_for_owner(db, job_id, current_user)
-    if job.status not in (JobStatus.DRAFT.value, JobStatus.SLICED.value, JobStatus.REJECTED.value):
+    if job.status not in (
+        JobStatus.DRAFT.value,
+        JobStatus.SLICED.value,
+        JobStatus.SLICE_FAILED.value,
+        JobStatus.REJECTED.value,
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "INVALID_JOB_STATE", "message": "Cannot reorient a job that is already submitted"},
         )
 
-    bounds = run_auto_orient(Path(job.original_stl_path), Path(job.oriented_stl_path), sys_settings)
+    oriented_path = Path(job.oriented_stl_path)
+    bounds = run_auto_orient(Path(job.original_stl_path), oriented_path, sys_settings)
+    preview_path = oriented_path.parent / "preview.stl"
+    has_preview = generate_preview_stl(oriented_path, preview_path)
+    if not has_preview:
+        preview_path.unlink(missing_ok=True)
+    job.preview_stl_path = str(preview_path) if has_preview else None
     job.pos_x_mm = 0.0
     job.pos_y_mm = 0.0
     job.quat_x = 0.0
@@ -239,6 +259,7 @@ def reorient_job(
     job.bbox_min_z = bounds.min_z
     job.bbox_max_z = bounds.max_z
     job.status = JobStatus.DRAFT.value
+    job.slice_error = None
     job.estimated_grams = None
     job.estimated_minutes = None
     job.layer_count = None
@@ -249,21 +270,48 @@ def reorient_job(
     return serialize_job(db, _load_job_for_owner(db, job.id, current_user), sys_settings)
 
 
+@router.get("/queue/stats", response_model=SliceQueueStatsOut)
+def get_slice_queue_stats(
+    _current_user: User = Depends(get_current_user),
+) -> SliceQueueStatsOut:
+    """Return live slice worker pool and queue depth statistics."""
+    return SliceQueueStatsOut(**slice_queue.stats())
+
+
 @router.get("/{job_id}/mesh")
 def get_job_oriented_mesh(
     job_id: int,
+    request: Request,
+    full: bool = False,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> FileResponse:
-    """Stream the auto-oriented STL binary for the owner or authorized reviewer."""
+) -> Response:
+    """Stream the preview (or full-resolution with ?full=true) oriented STL with ETag caching."""
     job = _load_job_for_read(db, job_id, current_user)
     mesh_path = Path(job.oriented_stl_path)
+    if not full and job.preview_stl_path:
+        preview_candidate = Path(job.preview_stl_path)
+        if preview_candidate.is_file():
+            mesh_path = preview_candidate
     if not mesh_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "MESH_NOT_FOUND", "message": "Oriented mesh file not found"},
         )
-    return FileResponse(path=mesh_path, media_type="model/stl", filename=f"oriented_{job.original_filename}")
+    stat = mesh_path.stat()
+    etag = f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+    headers = {
+        "Cache-Control": "private, max-age=3600",
+        "ETag": etag,
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return FileResponse(
+        path=mesh_path,
+        media_type="model/stl",
+        filename=f"oriented_{job.original_filename}",
+        headers=headers,
+    )
 
 
 @router.get("/{job_id}/stl")
@@ -314,19 +362,49 @@ def get_job_gcode(
 async def slice_job(
     job_id: int,
     payload: TransformPayload,
+    sync: bool = False,
     current_user: User = Depends(require_permission(Permission.SLICER_USE)),
     db: Session = Depends(get_db),
 ) -> JobDetail:
-    """Validate bed bounds, bake student transform, and slice using admin profiles."""
+    """Validate bed bounds, persist transform, and enqueue background slicing (or wait if sync=true)."""
     sys_settings = get_system_settings(db)
     job = _load_job_for_owner(db, job_id, current_user)
-    if job.status not in (JobStatus.DRAFT.value, JobStatus.SLICED.value, JobStatus.REJECTED.value):
+    if job.status not in (
+        JobStatus.DRAFT.value,
+        JobStatus.SLICED.value,
+        JobStatus.SLICE_FAILED.value,
+        JobStatus.REJECTED.value,
+        JobStatus.SLICING_QUEUED.value,
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "INVALID_JOB_STATE", "message": "Cannot re-slice a job after submission"},
         )
 
     printer, slot = _validate_printer_and_slot(db, payload.printer_id, payload.slot_id)
+
+    try:
+        _, bounds = MockTrimeshSlicer().apply_transform(
+            oriented_stl_path=Path(job.oriented_stl_path),
+            pos_x_mm=payload.pos_x_mm,
+            pos_y_mm=payload.pos_y_mm,
+            quat_x=payload.quat_x,
+            quat_y=payload.quat_y,
+            quat_z=payload.quat_z,
+            quat_w=payload.quat_w,
+            scale=payload.scale,
+        )
+        _validate_bed_bounds(bounds, printer)
+    except OutOfBoundsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "OUT_OF_BOUNDS", "message": str(exc)},
+        ) from exc
+    except SlicerError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "SLICER_ERROR", "message": str(exc)},
+        ) from exc
 
     if (
         sys_settings.filament_api_enabled
@@ -345,33 +423,7 @@ async def slice_job(
             detail={"code": "INVALID_PATH", "message": "Invalid output G-code path"},
         )
 
-    try:
-        result = run_slice(
-            oriented_stl_path=Path(job.oriented_stl_path),
-            output_gcode_path=gcode_path,
-            printer=printer,
-            slot=slot,
-            sys_settings=sys_settings,
-            pos_x_mm=payload.pos_x_mm,
-            pos_y_mm=payload.pos_y_mm,
-            quat_x=payload.quat_x,
-            quat_y=payload.quat_y,
-            quat_z=payload.quat_z,
-            quat_w=payload.quat_w,
-            scale=payload.scale,
-            supports_enabled=payload.supports_enabled,
-        )
-    except OutOfBoundsError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "OUT_OF_BOUNDS", "message": str(exc)},
-        ) from exc
-    except SlicerError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "SLICER_ERROR", "message": str(exc)},
-        ) from exc
-
+    prev_status = job.status
     job.printer_id = printer.id
     job.slot_id = slot.id
     job.filament_id = slot.filament_id
@@ -382,21 +434,60 @@ async def slice_job(
     job.quat_z = payload.quat_z
     job.quat_w = payload.quat_w
     job.scale = payload.scale
-    job.bbox_min_x = result.bounds.min_x
-    job.bbox_max_x = result.bounds.max_x
-    job.bbox_min_y = result.bounds.min_y
-    job.bbox_max_y = result.bounds.max_y
-    job.bbox_min_z = result.bounds.min_z
-    job.bbox_max_z = result.bounds.max_z
-    job.estimated_grams = result.estimated_grams
-    job.estimated_minutes = result.estimated_minutes
-    job.layer_count = result.layer_count
-    job.supports_enabled = result.supports_enabled
-    job.sliced_output_path = str(result.gcode_path)
-    job.gcode_filename = result.gcode_filename
-    job.status = JobStatus.SLICED.value
-
+    job.bbox_min_x = bounds.min_x
+    job.bbox_max_x = bounds.max_x
+    job.bbox_min_y = bounds.min_y
+    job.bbox_max_y = bounds.max_y
+    job.bbox_min_z = bounds.min_z
+    job.bbox_max_z = bounds.max_z
+    job.supports_enabled = payload.supports_enabled
+    job.slice_error = None
+    job.status = JobStatus.SLICING_QUEUED.value
     db.commit()
+
+    max_workers = max(1, min(4, int(getattr(sys_settings, "max_concurrent_slices", 2) or 2)))
+    slice_queue.ensure_started(max_workers=max_workers)
+    try:
+        task_seq = slice_queue.enqueue(
+            SliceTask(
+                job_id=job.id,
+                printer_id=printer.id,
+                slot_id=slot.id,
+                pos_x_mm=payload.pos_x_mm,
+                pos_y_mm=payload.pos_y_mm,
+                quat_x=payload.quat_x,
+                quat_y=payload.quat_y,
+                quat_z=payload.quat_z,
+                quat_w=payload.quat_w,
+                scale=payload.scale,
+                supports_enabled=payload.supports_enabled,
+                gcode_path=str(gcode_path),
+            )
+        )
+    except SliceQueueFullError as exc:
+        job.status = prev_status
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"code": "SLICE_QUEUE_FULL", "message": str(exc)},
+        ) from exc
+
+    if sync:
+        finished = await asyncio.to_thread(slice_queue.wait_for_job, job.id, task_seq, 180.0)
+        db.expire_all()
+        job = _load_job_for_owner(db, job.id, current_user)
+        if not finished:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={"code": "SLICE_TIMEOUT", "message": "Slicing timed out while waiting for completion"},
+            )
+        if job.status == JobStatus.SLICE_FAILED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "SLICER_ERROR", "message": job.slice_error or "Slicing failed"},
+            )
+        return serialize_job(db, job, sys_settings)
+
     db.refresh(job)
     return serialize_job(db, _load_job_for_owner(db, job.id, current_user), sys_settings)
 
@@ -414,6 +505,15 @@ async def submit_job(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "JOB_NOT_SLICED", "message": "Job must be sliced before submitting"},
+        )
+
+    if job.printer and str(job.printer.fdm_monster_id or "").startswith("manual-"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "PRINTER_NOT_LINKED_FDM",
+                "message": "Cette imprimante n'est pas reliée à FDM Monster. Téléchargez le fichier G-code.",
+            },
         )
 
     if job.printer and job.printer.status == "printing":
@@ -580,6 +680,18 @@ def get_my_jobs(
     )
 
 
+@router.get("/{job_id}", response_model=JobDetail)
+def get_job_detail(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> JobDetail:
+    """Return full detail (including live slice queue position/status) for an accessible job."""
+    sys_settings = get_system_settings(db)
+    job = _load_job_for_read(db, job_id, current_user)
+    return serialize_job(db, job, sys_settings)
+
+
 @router.delete("/drafts")
 def clear_my_drafts(
     current_user: User = Depends(get_current_user),
@@ -605,12 +717,12 @@ def delete_my_draft(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "JOB_NOT_FOUND", "message": "Print job not found"},
         )
-    if job.status not in DRAFT_STATUSES:
+    if job.status not in DRAFT_STATUSES and job.status != JobStatus.SLICE_FAILED.value:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": "NOT_A_DRAFT",
-                "message": "Only DRAFT or SLICED jobs can be deleted",
+                "message": "Only DRAFT, SLICED, or SLICE_FAILED jobs can be deleted",
             },
         )
     delete_job_with_files(db, job, commit=True)
