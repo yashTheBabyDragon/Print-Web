@@ -766,6 +766,18 @@ class SystemSettingsPatch(BaseModel):
     filament_api_url: Optional[str] = Field(default=None, max_length=255)
 
 
+class SystemUpdateStatusOut(BaseModel):
+    current_version: str
+    latest_version: Optional[str] = None
+    update_available: bool = False
+    release_url: Optional[str] = None
+    release_notes: Optional[str] = None
+    published_at: Optional[str] = None
+    checked_at: str
+    repo: str
+    error: Optional[str] = None
+
+
 # --- FilamentAPI Integration ---
 
 class FilamentApiPrinterOut(BaseModel):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import secrets
 import string
 from collections.abc import Iterable
@@ -89,6 +90,7 @@ from app.schemas import (
     StudentClassBadge,
     SystemSettingsOut,
     SystemSettingsPatch,
+    SystemUpdateStatusOut,
     TeacherClassCreate,
     TeacherClassOut,
     TeacherClassPatch,
@@ -115,6 +117,7 @@ from app.services.profiles import (
     delete_profile_file,
     extract_orca_filament_entries,
     parse_orca_filament_json,
+    read_upload_bounded,
     save_profile_file,
     test_slice_calibration_cube,
 )
@@ -127,9 +130,13 @@ from app.services.serializers import (
     serialize_job,
     serialize_settings,
 )
-from app.services.slicer import SlicerError
+from app.services.slicer import SlicerError, validate_orca_cli_path
+from app.services.updater import check_latest_github_release
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+_PROFILE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB per profile/archive file
+_CSV_UPLOAD_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per CSV file
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +753,7 @@ async def admin_import_orca_filaments(
 
     for upload in files:
         upload_name = Path(upload.filename or "filament.json").name
-        raw = await upload.read()
+        raw = await read_upload_bounded(upload, _PROFILE_UPLOAD_MAX_BYTES)
         try:
             entries = extract_orca_filament_entries(upload_name, raw)
         except ValueError as exc:
@@ -949,7 +956,7 @@ async def admin_upload_profile(
             detail={"code": "INVALID_FILE_TYPE", "message": "OrcaSlicer profile must be a .json file"},
         )
 
-    raw = await file.read()
+    raw = await read_upload_bounded(file, _PROFILE_UPLOAD_MAX_BYTES)
     try:
         stored_path = save_profile_file(filename, raw)
     except ValueError as exc:
@@ -1018,7 +1025,7 @@ async def admin_preview_prusaslicer(
 
     for upload in files:
         upload_name = Path(upload.filename or "config.ini").name
-        raw = await upload.read()
+        raw = await read_upload_bounded(upload, _PROFILE_UPLOAD_MAX_BYTES)
         try:
             ini_entries = extract_prusaslicer_ini_entries(upload_name, raw)
         except ValueError as exc:
@@ -1128,7 +1135,7 @@ async def admin_import_prusaslicer(
 
     for upload in files:
         upload_name = Path(upload.filename or "config.ini").name
-        raw = await upload.read()
+        raw = await read_upload_bounded(upload, _PROFILE_UPLOAD_MAX_BYTES)
         try:
             ini_entries = extract_prusaslicer_ini_entries(upload_name, raw)
         except ValueError as exc:
@@ -1447,10 +1454,44 @@ def admin_list_teachers(
     return [_serialize_teacher(db, t) for t in teachers]
 
 
+def _assert_delegation_ceiling(caller: User, requested_permissions: Iterable[str]) -> None:
+    """Prevent non-admin callers from granting permissions they do not themselves hold."""
+    if caller.role == "admin":
+        return
+    caller_perms = set(get_user_permissions(caller))
+    requested = set(requested_permissions)
+    excess = sorted(requested - caller_perms)
+    if excess:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": f"Cannot grant permissions you do not hold: {', '.join(excess)}",
+            },
+        )
+
+
+def _assert_can_manage_target_teacher(caller: User, target_teacher: User) -> None:
+    """Prevent non-admin callers from modifying, resetting, or deleting a teacher with higher permissions."""
+    if caller.role == "admin":
+        return
+    caller_perms = set(get_user_permissions(caller))
+    target_perms = set(get_user_permissions(target_teacher))
+    excess = sorted(target_perms - caller_perms)
+    if excess:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "Cannot manage a teacher who holds permissions you do not have",
+            },
+        )
+
+
 @router.post("/teachers", response_model=AdminTeacherOut, status_code=status.HTTP_201_CREATED)
 def admin_create_teacher(
     body: AdminTeacherCreate,
-    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> AdminTeacherOut:
     existing = db.scalar(select(User).where(User.da == body.identifier))
@@ -1466,6 +1507,13 @@ def admin_create_teacher(
         permissions=body.permissions,
         preset=body.preset,
     )
+    effective_target_perms = (
+        json.loads(perms_json)
+        if (should_set_perms and perms_json is not None)
+        else get_permissions_for_role("teacher")
+    )
+    _assert_delegation_ceiling(caller, effective_target_perms)
+
     teacher = User(
         da=body.identifier,
         name=body.name.strip(),
@@ -1485,26 +1533,42 @@ def admin_create_teacher(
 def admin_patch_teacher(
     teacher_id: int,
     body: AdminTeacherPatch,
-    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> AdminTeacherOut:
     teacher = db.get(User, teacher_id)
     if teacher is None or teacher.role != "teacher":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Teacher not found")
 
-    fields = body.model_fields_set
-    if "name" in fields and body.name is not None:
-        teacher.name = body.name.strip()
-    if "is_active" in fields and body.is_active is not None:
-        teacher.is_active = body.is_active
+    _assert_can_manage_target_teacher(caller, teacher)
 
+    fields = body.model_fields_set
     should_set_perms, perms_json = _resolve_custom_permissions_json(
         permissions=body.permissions if "permissions" in fields else None,
         preset=body.preset if "preset" in fields else None,
         reset_permissions=body.reset_permissions,
     )
     if should_set_perms:
+        if caller.role != "admin" and teacher.id == caller.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "You cannot modify your own permissions",
+                },
+            )
+        effective_target_perms = (
+            json.loads(perms_json)
+            if perms_json is not None
+            else get_permissions_for_role("teacher")
+        )
+        _assert_delegation_ceiling(caller, effective_target_perms)
         teacher.permissions_json = perms_json
+
+    if "name" in fields and body.name is not None:
+        teacher.name = body.name.strip()
+    if "is_active" in fields and body.is_active is not None:
+        teacher.is_active = body.is_active
 
     db.commit()
     db.refresh(teacher)
@@ -1515,12 +1579,14 @@ def admin_patch_teacher(
 def admin_reset_teacher_password(
     teacher_id: int,
     body: Optional[ResetPasswordRequest] = None,
-    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> ResetPasswordResponse:
     teacher = db.get(User, teacher_id)
     if teacher is None or teacher.role != "teacher":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Teacher not found")
+
+    _assert_can_manage_target_teacher(caller, teacher)
 
     if body and body.new_password:
         temp_pwd = body.new_password
@@ -1529,6 +1595,7 @@ def admin_reset_teacher_password(
         temp_pwd = "".join(secrets.choice(alphabet) for _ in range(8))
 
     teacher.password_hash = hash_password(temp_pwd)
+    teacher.token_version = (getattr(teacher, "token_version", 0) or 0) + 1
     db.commit()
     return ResetPasswordResponse(da=teacher.da, temp_password=temp_pwd)
 
@@ -1536,7 +1603,7 @@ def admin_reset_teacher_password(
 @router.delete("/teachers/{teacher_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_teacher(
     teacher_id: int,
-    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+    caller: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> None:
     teacher = db.scalar(
@@ -1546,6 +1613,8 @@ def admin_delete_teacher(
     )
     if teacher is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Teacher not found")
+
+    _assert_can_manage_target_teacher(caller, teacher)
 
     candidate_das = [
         enrollment.da
@@ -1616,7 +1685,7 @@ def _parse_bulk_student_line(line: str) -> tuple[str, Optional[str], Optional[fl
     try:
         if len(parts) > 2 and parts[2]:
             val_g = float(parts[2])
-            if not (0.0 < val_g <= 5000.0):
+            if not (math.isfinite(val_g) and 0.0 < val_g <= 5000.0):
                 return None
             max_grams = val_g
         if len(parts) > 3 and parts[3]:
@@ -1969,7 +2038,7 @@ async def admin_import_class_csv(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
     _assert_class_access(staff_user, tc)
 
-    raw = await file.read()
+    raw = await read_upload_bounded(file, _CSV_UPLOAD_MAX_BYTES)
     text = raw.decode("utf-8-sig", errors="replace")
     reader = csv.reader(io.StringIO(text))
 
@@ -1995,9 +2064,17 @@ async def admin_import_class_csv(
         max_mins: Optional[int] = None
         try:
             if len(row) > 2 and row[2].strip():
-                max_grams = float(row[2].strip())
+                val_g = float(row[2].strip())
+                if not (math.isfinite(val_g) and 0.0 < val_g <= 5000.0):
+                    skipped += 1
+                    continue
+                max_grams = val_g
             if len(row) > 3 and row[3].strip():
-                max_mins = int(row[3].strip())
+                val_m = int(row[3].strip())
+                if not (0 < val_m <= 10080):
+                    skipped += 1
+                    continue
+                max_mins = val_m
         except ValueError:
             skipped += 1
             continue
@@ -2190,7 +2267,7 @@ async def admin_upload_whitelist_csv(
     db: Session = Depends(get_db),
 ) -> WhitelistCsvResult:
     tc = _resolve_legacy_whitelist_class(db, staff_user)
-    raw = await file.read()
+    raw = await read_upload_bounded(file, _CSV_UPLOAD_MAX_BYTES)
     text = raw.decode("utf-8-sig", errors="replace")
     reader = csv.reader(io.StringIO(text))
 
@@ -2213,9 +2290,17 @@ async def admin_upload_whitelist_csv(
         max_mins: Optional[int] = None
         try:
             if len(row) > 2 and row[2].strip():
-                max_grams = float(row[2].strip())
+                val_g = float(row[2].strip())
+                if not (math.isfinite(val_g) and 0.0 < val_g <= 5000.0):
+                    skipped += 1
+                    continue
+                max_grams = val_g
             if len(row) > 3 and row[3].strip():
-                max_mins = int(row[3].strip())
+                val_m = int(row[3].strip())
+                if not (0 < val_m <= 10080):
+                    skipped += 1
+                    continue
+                max_mins = val_m
         except ValueError:
             skipped += 1
             continue
@@ -2254,12 +2339,13 @@ def admin_delete_whitelist(
     else:
         entries = list(db.scalars(select(ClassEnrollment).where(ClassEnrollment.da == da)))
     if not entries:
-        legacy = db.get(DAWhitelist, da)
-        if legacy is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Whitelist entry not found")
-        db.delete(legacy)
-        db.commit()
-        return
+        if has_permission(staff_user, Permission.CLASSES_MANAGE_ALL):
+            legacy = db.get(DAWhitelist, da)
+            if legacy is not None:
+                db.delete(legacy)
+                db.commit()
+                return
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Whitelist entry not found")
     for e in entries:
         db.delete(e)
     db.flush()
@@ -2466,6 +2552,7 @@ def admin_reset_student_password(
         temp_pwd = "".join(secrets.choice(alphabet) for _ in range(8))
 
     user.password_hash = hash_password(temp_pwd)
+    user.token_version = (getattr(user, "token_version", 0) or 0) + 1
     db.commit()
     return ResetPasswordResponse(da=user.da, temp_password=temp_pwd)
 
@@ -2527,13 +2614,21 @@ def admin_decide_account_request(
         target_cls = db.get(TeacherClass, body.class_id)
         if target_cls is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
-        if staff_user.role == "teacher" and target_cls.teacher_id != staff_user.id:
+        if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL) and target_cls.teacher_id != staff_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail={"code": "FORBIDDEN", "message": "Selected class belongs to another teacher"},
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Selected class belongs to another teacher",
+                    "required_permission": Permission.CLASSES_MANAGE_ALL.value,
+                },
             )
     else:
-        target_teacher_id = staff_user.id if staff_user.role == "teacher" else user.requested_teacher_id
+        target_teacher_id = (
+            staff_user.id
+            if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL)
+            else user.requested_teacher_id
+        )
         if target_teacher_id is None:
             target_teacher_id = db.scalar(
                 select(User.id)
@@ -2664,6 +2759,17 @@ async def admin_decide_approval(
         return serialize_job(db, job, sys_settings)
 
     if body.decision == "approve_and_raise":
+        if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL):
+            if not has_permission(staff_user, Permission.STUDENTS_MANAGE_OWN):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "code": "FORBIDDEN",
+                        "message": "Permission 'students:manage_own' or 'students:manage_all' is required to raise student limits.",
+                        "required_permission": Permission.STUDENTS_MANAGE_OWN.value,
+                    },
+                )
+            _ensure_teacher_owns_student(db, staff_user.id, job.user.da)
         if body.new_max_active_grams is not None:
             job.user.max_active_grams_override = body.new_max_active_grams
         if body.new_max_print_minutes is not None:
@@ -2689,6 +2795,15 @@ async def admin_decide_approval(
 # ---------------------------------------------------------------------------
 # Global Settings (Admin Only)
 # ---------------------------------------------------------------------------
+
+@router.get("/system/update-status", response_model=SystemUpdateStatusOut)
+async def admin_get_update_status(
+    force: bool = False,
+    _admin: User = Depends(require_permission(Permission.SETTINGS_MANAGE)),
+) -> SystemUpdateStatusOut:
+    """Check GitHub Releases for the latest version of GGPrint-Web."""
+    return await check_latest_github_release(force=force)
+
 
 @router.get("/settings", response_model=SystemSettingsOut)
 def admin_get_settings(
@@ -2728,7 +2843,13 @@ def admin_patch_settings(
     if "slicer_mode" in fields and body.slicer_mode is not None:
         sys_settings.slicer_mode = body.slicer_mode
     if "orca_cli_path" in fields and body.orca_cli_path is not None:
-        sys_settings.orca_cli_path = body.orca_cli_path.strip()
+        try:
+            sys_settings.orca_cli_path = validate_orca_cli_path(body.orca_cli_path)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_SLICER_PATH", "message": str(exc)},
+            ) from exc
     if "filament_api_enabled" in fields and body.filament_api_enabled is not None:
         sys_settings.filament_api_enabled = body.filament_api_enabled
     if "filament_api_url" in fields and body.filament_api_url is not None:

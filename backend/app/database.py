@@ -28,6 +28,8 @@ def _build_engine(database_url: str):
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.close()
     return eng
 
@@ -74,6 +76,10 @@ def _migrate_sqlite_schema(eng) -> None:
             if "budget_reset_at" not in user_cols:
                 conn.execute(
                     text("ALTER TABLE users ADD COLUMN budget_reset_at DATETIME")
+                )
+            if "token_version" not in user_cols:
+                conn.execute(
+                    text("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
                 )
 
         job_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(print_jobs)"))}

@@ -630,6 +630,18 @@ export const fr = {
       filamentApiTestOk: 'Connecté · {count} imprimante(s) configurée(s)',
       filamentApiTestFail: 'Connexion impossible',
       saveSettings: 'Enregistrer les paramètres',
+      updateSectionTitle: 'Version logicielle & Mises à jour GitHub',
+      updateSectionDesc:
+        'Vérifie automatiquement les nouvelles versions publiées sur GitHub Releases et indique la commande de mise à jour Docker Compose.',
+      currentVersionLabel: 'Version installée',
+      latestVersionLabel: 'Dernière version GitHub',
+      updateAvailableBadge: 'Mise à jour disponible',
+      upToDateBadge: 'À jour',
+      checkUpdatesBtn: 'Vérifier les mises à jour',
+      checkingUpdatesBtn: 'Vérification…',
+      viewReleaseLink: 'Voir la version sur GitHub',
+      updateCliHint: 'Mise à jour manuelle sur votre hôte Docker (ou automatique via le timer quotidien) :',
+      updateCheckError: 'Impossible de vérifier les mises à jour GitHub',
     },
   },
 };

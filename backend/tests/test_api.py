@@ -937,11 +937,11 @@ def test_unlisted_da_pending_account_approval_flow(client: TestClient):
         "suggested_name": None,
     }
 
-    # Seeded enrolled DA 2333572 -> in_roster=True with suggested_name
+    # Seeded enrolled DA 2333572 -> in_roster=True without leaking suggested_name (PII protection)
     r_chk_enrolled = client.get("/api/auth/check-da/2333572")
     assert r_chk_enrolled.status_code == 200
     assert r_chk_enrolled.json()["in_roster"] is True
-    assert r_chk_enrolled.json()["suggested_name"] == "Gabriel"
+    assert r_chk_enrolled.json()["suggested_name"] is None
 
     # Register 2499999 under Teacher A -> pending_approval=True, no token
     r_reg = client.post(

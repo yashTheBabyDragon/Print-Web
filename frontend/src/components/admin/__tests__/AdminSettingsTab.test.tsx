@@ -25,6 +25,15 @@ describe('AdminSettingsTab', () => {
   beforeEach(() => {
     localStorage.setItem('ggprint_lang', 'en');
     vi.restoreAllMocks();
+    vi.spyOn(api, 'adminGetUpdateStatus').mockResolvedValue({
+      current_version: '1.0.0',
+      latest_version: '1.0.0',
+      update_available: false,
+      release_url: 'https://github.com/yashTheBabyDragon/GGPrint-Web/releases/tag/v1.0.0',
+      checked_at: '2026-01-01T00:00:00Z',
+      repo: 'yashTheBabyDragon/GGPrint-Web',
+      error: null,
+    });
   });
 
   it('toggles FilamentAPI settings, updates URL, and saves', async () => {
@@ -110,5 +119,77 @@ describe('AdminSettingsTab', () => {
 
     await user.click(screen.getByRole('button', { name: /Test connection/i }));
     expect(await screen.findByText(/Connection failed: Connection refused/i)).toBeInTheDocument();
+  });
+
+  it('displays software version status and forces an update check on button click', async () => {
+    const user = userEvent.setup();
+    const updateStatusSpy = vi
+      .spyOn(api, 'adminGetUpdateStatus')
+      .mockResolvedValueOnce({
+        current_version: '1.0.0',
+        latest_version: '1.0.0',
+        update_available: false,
+        release_url: 'https://github.com/yashTheBabyDragon/GGPrint-Web/releases/tag/v1.0.0',
+        checked_at: '2026-01-01T00:00:00Z',
+        repo: 'yashTheBabyDragon/GGPrint-Web',
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        current_version: '1.0.0',
+        latest_version: '1.2.0',
+        update_available: true,
+        release_url: 'https://github.com/yashTheBabyDragon/GGPrint-Web/releases/tag/v1.2.0',
+        checked_at: '2026-01-01T00:05:00Z',
+        repo: 'yashTheBabyDragon/GGPrint-Web',
+        error: null,
+      });
+
+    render(
+      <I18nProvider>
+        <AdminSettingsTab
+          settings={BASE_SETTINGS}
+          onReload={vi.fn().mockResolvedValue(undefined)}
+          onError={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    expect(await screen.findByText('Up to date')).toBeInTheDocument();
+    expect(
+      screen.getByText('sudo /opt/ggprint/deploy/update-from-release.sh')
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Check for updates/i }));
+
+    await waitFor(() => {
+      expect(updateStatusSpy).toHaveBeenLastCalledWith(true);
+    });
+    expect(await screen.findByText('Update available')).toBeInTheDocument();
+    expect(screen.getByText('v1.2.0')).toBeInTheDocument();
+  });
+
+  it('refuses to render unsafe or non-GitHub release_url links', async () => {
+    vi.spyOn(api, 'adminGetUpdateStatus').mockResolvedValueOnce({
+      current_version: '1.0.0',
+      latest_version: '1.2.0',
+      update_available: true,
+      release_url: 'javascript:alert(1)',
+      checked_at: '2026-01-01T00:00:00Z',
+      repo: 'yashTheBabyDragon/GGPrint-Web',
+      error: null,
+    });
+
+    render(
+      <I18nProvider>
+        <AdminSettingsTab
+          settings={BASE_SETTINGS}
+          onReload={vi.fn().mockResolvedValue(undefined)}
+          onError={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    expect(await screen.findByText('Update available')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /View release on GitHub/i })).not.toBeInTheDocument();
   });
 });

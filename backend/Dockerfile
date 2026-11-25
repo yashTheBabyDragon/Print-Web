@@ -69,9 +69,17 @@ COPY sample-models /app/sample-models
 RUN pip install --upgrade pip && \
     pip install . psycopg2-binary
 
-RUN mkdir -p /data /profiles /opt/orcaslicer
+RUN groupadd --system ggprint && \
+    useradd --system --gid ggprint --create-home --home-dir /home/ggprint --shell /usr/sbin/nologin ggprint && \
+    mkdir -p /data /profiles /opt/orcaslicer /app/backend/data && \
+    chown -R ggprint:ggprint /data /profiles /app/backend
 
 EXPOSE 8000
 
+HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
+
+USER ggprint
+
 # Ensure /data/profiles points to the dedicated /profiles volume mount
-CMD ["/bin/sh", "-c", "mkdir -p /data/jobs /profiles && if [ -d /data/profiles ] && [ ! -L /data/profiles ]; then rmdir /data/profiles 2>/dev/null || true; fi && if [ ! -e /data/profiles ]; then ln -s /profiles /data/profiles; fi && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+CMD ["/bin/sh", "-c", "mkdir -p /data/jobs /data/backups /profiles && if [ -d /data/profiles ] && [ ! -L /data/profiles ]; then rmdir /data/profiles 2>/dev/null || true; fi && if [ ! -e /data/profiles ]; then ln -s /profiles /data/profiles; fi && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

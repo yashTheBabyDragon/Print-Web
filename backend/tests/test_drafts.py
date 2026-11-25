@@ -228,7 +228,10 @@ def test_logout_deletes_user_drafts_only(client: TestClient):
     assert r_logout.status_code == 200, r_logout.text
     assert r_logout.json() == {"deleted": 2}
 
-    mine = client.get("/api/jobs/mine", headers=_auth_header(student_token)).json()["jobs"]
+    # Pre-logout token is now revoked; re-login to inspect remaining jobs
+    assert client.get("/api/jobs/mine", headers=_auth_header(student_token)).status_code == 401
+    fresh_token = _login(client, "2345678", "student123")["access_token"]
+    mine = client.get("/api/jobs/mine", headers=_auth_header(fresh_token)).json()["jobs"]
     mine_ids = {j["id"] for j in mine}
     assert d1["id"] not in mine_ids
     assert d2["id"] not in mine_ids

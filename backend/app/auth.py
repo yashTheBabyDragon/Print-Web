@@ -40,6 +40,7 @@ def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -
         "sub": str(user.id),
         "da": user.da,
         "role": user.role,
+        "tv": int(getattr(user, "token_version", 0)),
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
@@ -91,6 +92,19 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "USER_NOT_FOUND", "message": "User no longer exists"},
+        )
+    token_tv = payload.get("tv", 0)
+    try:
+        token_tv_int = int(token_tv)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "INVALID_TOKEN", "message": "Malformed token version"},
+        ) from exc
+    if token_tv_int != int(getattr(user, "token_version", 0)):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "TOKEN_REVOKED", "message": "Session has been revoked; please log in again"},
         )
     if user.approval_status == "pending":
         teacher_name = None

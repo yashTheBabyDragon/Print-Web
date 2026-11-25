@@ -1,0 +1,13 @@
+[Unit]
+Description=GGPrint Automatic GitHub Release Updater (Docker Compose)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ggprint
+EnvironmentFile=-/opt/ggprint/.env
+ExecStart=/opt/ggprint/deploy/update-from-release.sh
+Nice=10
+IOSchedulingClass=idle

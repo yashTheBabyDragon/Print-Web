@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -15,10 +17,63 @@ logger = logging.getLogger(__name__)
 WEBHOOK_TIMEOUT_SECONDS = 8.0
 
 
+def _is_disallowed_ip(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return bool(
+        ip_obj.is_loopback
+        or ip_obj.is_private
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+        or ip_obj.is_reserved
+    )
+
+
+def is_safe_webhook_host(hostname: str, *, resolve_dns: bool = False) -> tuple[bool, str]:
+    """Check that a webhook hostname is not a loopback, private, link-local, or internal target."""
+    host = hostname.strip().lower().rstrip(".")
+    if not host:
+        return False, "Missing webhook host"
+    if (
+        host == "localhost"
+        or host.endswith(".localhost")
+        or host.endswith(".local")
+        or host.endswith(".internal")
+    ):
+        return False, "Blocked webhook target"
+
+    try:
+        ip_literal = ipaddress.ip_address(host)
+    except ValueError:
+        ip_literal = None
+
+    if ip_literal is not None:
+        if _is_disallowed_ip(ip_literal):
+            return False, "Blocked webhook target"
+        return True, ""
+
+    if resolve_dns:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return False, "Webhook host resolution failed"
+        if not infos:
+            return False, "Webhook host resolution failed"
+        for info in infos:
+            raw_ip = info[4][0]
+            try:
+                resolved_ip = ipaddress.ip_address(raw_ip.split("%", 1)[0])
+            except ValueError:
+                return False, "Blocked webhook target"
+            if _is_disallowed_ip(resolved_ip):
+                return False, "Blocked webhook target"
+
+    return True, ""
+
+
 def normalize_webhook_url(raw_url: Optional[str]) -> Optional[str]:
     """Validate and normalize a user-configured HTTP(S) webhook URL.
 
-    Returns None when blank/None. Raises ValueError for invalid schemes or hosts.
+    Returns None when blank/None. Raises ValueError for invalid schemes or blocked hosts.
     """
     if raw_url is None:
         return None
@@ -30,12 +85,19 @@ def normalize_webhook_url(raw_url: Optional[str]) -> Optional[str]:
     parsed = urlparse(cleaned)
     if parsed.scheme not in ("http", "https") or not parsed.netloc or not parsed.hostname:
         raise ValueError("Webhook URL must start with http:// or https:// and include a valid host.")
+    safe, reason = is_safe_webhook_host(parsed.hostname, resolve_dns=False)
+    if not safe:
+        raise ValueError(reason)
     return cleaned
 
 
 def _is_discord_webhook(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    return host.endswith("discord.com") or host.endswith("discordapp.com")
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    return (
+        host in ("discord.com", "discordapp.com")
+        or host.endswith(".discord.com")
+        or host.endswith(".discordapp.com")
+    )
 
 
 def build_job_completed_payload(job: PrintJob, webhook_url: str) -> dict[str, Any]:
@@ -129,9 +191,17 @@ def build_test_webhook_payload(user: User, webhook_url: str) -> dict[str, Any]:
 
 
 async def post_webhook(url: str, payload: dict[str, Any]) -> tuple[bool, Optional[int], Optional[str]]:
-    """Send a JSON POST request to the configured webhook URL."""
+    """Send a JSON POST request to the configured webhook URL after SSRF DNS validation."""
+    parsed = urlparse(url)
+    safe, reason = is_safe_webhook_host(parsed.hostname or "", resolve_dns=True)
+    if not safe:
+        return False, None, reason
+
     try:
-        async with httpx.AsyncClient(timeout=WEBHOOK_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(
+            timeout=WEBHOOK_TIMEOUT_SECONDS,
+            follow_redirects=False,
+        ) as client:
             resp = await client.post(
                 url,
                 json=payload,
@@ -141,7 +211,8 @@ async def post_webhook(url: str, payload: dict[str, Any]) -> tuple[bool, Optiona
                 return True, resp.status_code, None
             return False, resp.status_code, f"HTTP {resp.status_code}"
     except Exception as exc:
-        return False, None, str(exc)
+        logger.warning("Webhook POST failed for %s: %s", parsed.hostname, exc)
+        return False, None, "Webhook request failed"
 
 
 async def notify_job_completed(job: PrintJob) -> bool:

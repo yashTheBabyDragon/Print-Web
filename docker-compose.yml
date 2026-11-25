@@ -2,10 +2,12 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ggprint}
       POSTGRES_USER: ${POSTGRES_USER:-ggprint}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ggprint_change_me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - ggprint_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -19,29 +21,37 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-ggprint}:${POSTGRES_PASSWORD:-ggprint_change_me}@postgres:5432/${POSTGRES_DB:-ggprint}
-      JWT_SECRET: ${JWT_SECRET:-change-this-to-a-long-random-production-secret}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-ggprint}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-ggprint}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
       DEV_SEED: ${DEV_SEED:-false}
       INSTITUTION: ${INSTITUTION:-Cégep Gérald-Godin}
       DATA_DIR: /data
       SAMPLE_MODELS_DIR: /app/sample-models
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-15}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost","http://localhost:8080","http://localhost:5173"]}
+      APP_VERSION: ${APP_VERSION:-}
+      GITHUB_REPO: ${GITHUB_REPO:-yashTheBabyDragon/GGPrint-Web}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     volumes:
       - ggprint_data:/data
       - ggprint_profiles:/profiles
       # Uncomment on Proxmox once OrcaSlicer AppImage is extracted to /opt/orcaslicer:
       # - /opt/orcaslicer:/opt/orcaslicer:ro
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
       interval: 15s
       timeout: 5s
+      start_period: 15s
       retries: 5
 
   frontend:
@@ -49,11 +59,19 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       backend:
         condition: service_healthy
     ports:
       - "${FRONTEND_PORT:-80}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
 volumes:
   ggprint_pgdata:

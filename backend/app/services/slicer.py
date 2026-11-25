@@ -1024,11 +1024,45 @@ def _parse_3mf_to_trimesh(three_mf_path: Path) -> trimesh.Trimesh:
     return merged
 
 
+ALLOWED_ORCA_CLI_BASENAMES: frozenset[str] = frozenset(
+    {
+        "orca-slicer",
+        "orca-slicer.exe",
+        "orca-slicer-headless",
+        "orcaslicer",
+        "orcaslicer.exe",
+    }
+)
+
+
+def validate_orca_cli_path(cli_path: str) -> str:
+    """Ensure cli_path points to an allowlisted OrcaSlicer binary name."""
+    cleaned = (cli_path or "").strip()
+    if not cleaned or any(ch in cleaned for ch in ("\x00", "\r", "\n")):
+        raise ValueError("Invalid OrcaSlicer executable path")
+
+    normalized = cleaned.replace("\\", "/")
+    basename = normalized.rsplit("/", 1)[-1].lower()
+    if basename in ALLOWED_ORCA_CLI_BASENAMES:
+        return cleaned
+    if basename == "apprun" and "orca" in normalized.lower():
+        return cleaned
+
+    raise ValueError(
+        f"Executable '{cleaned}' is not an allowed OrcaSlicer binary "
+        f"(allowed: {', '.join(sorted(ALLOWED_ORCA_CLI_BASENAMES))}, or AppRun under an Orca path)"
+    )
+
+
 class OrcaSlicerCliAdapter:
     """Production OrcaSlicer CLI adapter for Windows and Linux/Docker deployments."""
 
     def __init__(self, cli_path: Optional[str] = None) -> None:
-        self.cli_path = cli_path or detect_orca_cli_path() or "orca-slicer"
+        raw_path = cli_path or detect_orca_cli_path() or "orca-slicer"
+        try:
+            self.cli_path = validate_orca_cli_path(raw_path)
+        except ValueError as exc:
+            raise SlicerError(str(exc)) from exc
         self._geom_helper = MockTrimeshSlicer()
 
     def build_orient_command(self, input_stl: Path, output_3mf: Path) -> list[str]:

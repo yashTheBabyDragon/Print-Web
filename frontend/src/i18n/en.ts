@@ -632,6 +632,18 @@ export const en: Translations = {
       filamentApiTestOk: 'Connected · {count} printer(s) configured',
       filamentApiTestFail: 'Connection failed',
       saveSettings: 'Save settings',
+      updateSectionTitle: 'Software Version & GitHub Releases',
+      updateSectionDesc:
+        'Checks GitHub Releases for new versions and provides the Docker Compose update command alongside the daily auto-update timer.',
+      currentVersionLabel: 'Installed version',
+      latestVersionLabel: 'Latest GitHub release',
+      updateAvailableBadge: 'Update available',
+      upToDateBadge: 'Up to date',
+      checkUpdatesBtn: 'Check for updates',
+      checkingUpdatesBtn: 'Checking…',
+      viewReleaseLink: 'View release on GitHub',
+      updateCliHint: 'Run manually on your Docker host (or rely on the daily auto-update timer):',
+      updateCheckError: 'Unable to check GitHub Releases',
     },
   },
 };

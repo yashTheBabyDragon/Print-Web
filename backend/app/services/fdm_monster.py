@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy import select
@@ -248,9 +249,10 @@ class LiveFdmMonsterAdapter:
                     )
 
                     status_val = PrinterStatus.IDLE.value if enabled else PrinterStatus.OFFLINE.value
+                    pid_q = quote(pid, safe="")
                     try:
                         sock_resp = await client.get(
-                            f"{self.base_url}/api/v2/printer/{pid}/socket",
+                            f"{self.base_url}/api/v2/printer/{pid_q}/socket",
                             headers=self._headers(),
                         )
                         if sock_resp.status_code == 200:
@@ -261,7 +263,7 @@ class LiveFdmMonsterAdapter:
                     queue_count = 0
                     try:
                         q_resp = await client.get(
-                            f"{self.base_url}/api/v2/print-queue/{pid}",
+                            f"{self.base_url}/api/v2/print-queue/{pid_q}",
                             headers=self._headers(),
                         )
                         if q_resp.status_code == 200:
@@ -312,8 +314,9 @@ class LiveFdmMonsterAdapter:
                 if not file_storage_id:
                     raise FdmMonsterError("FDM Monster upload did not return fileStorageId")
 
+                printer_q = quote(printer.fdm_monster_id, safe="")
                 queue_resp = await client.post(
-                    f"{self.base_url}/api/v2/print-queue/{printer.fdm_monster_id}/from-file",
+                    f"{self.base_url}/api/v2/print-queue/{printer_q}/from-file",
                     headers=self._headers(),
                     json={"fileStorageId": file_storage_id, "addToQueue": True},
                 )
@@ -332,24 +335,26 @@ class LiveFdmMonsterAdapter:
 
     async def cancel_job(self, fdm_monster_job_id: str) -> None:
         printer_id, job_id = self._split_remote_job_id(fdm_monster_job_id)
+        printer_q = quote(printer_id, safe="") if printer_id else None
+        job_q = quote(job_id, safe="")
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                if printer_id:
+                if printer_q:
                     resp = await client.delete(
-                        f"{self.base_url}/api/v2/print-queue/{printer_id}/{job_id}",
+                        f"{self.base_url}/api/v2/print-queue/{printer_q}/{job_q}",
                         headers=self._headers(),
                     )
                     if resp.status_code < 400:
                         return
                 resp = await client.post(
-                    f"{self.base_url}/api/v2/print-jobs/{job_id}/set-cancelled",
+                    f"{self.base_url}/api/v2/print-jobs/{job_q}/set-cancelled",
                     headers=self._headers(),
                 )
                 if resp.status_code < 400:
                     return
-                if printer_id:
+                if printer_q:
                     stop_resp = await client.post(
-                        f"{self.base_url}/api/v2/printer/{printer_id}/job/cancel",
+                        f"{self.base_url}/api/v2/printer/{printer_q}/job/cancel",
                         headers=self._headers(),
                     )
                     stop_resp.raise_for_status()
@@ -360,10 +365,11 @@ class LiveFdmMonsterAdapter:
 
     async def get_job_status(self, fdm_monster_job_id: str) -> Optional[str]:
         _, job_id = self._split_remote_job_id(fdm_monster_job_id)
+        job_q = quote(job_id, safe="")
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
-                    f"{self.base_url}/api/v2/print-jobs/{job_id}",
+                    f"{self.base_url}/api/v2/print-jobs/{job_q}",
                     headers=self._headers(),
                 )
                 if resp.status_code in (403, 404):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.permissions import Permission, require_permission
+from app.permissions import Permission, has_permission, require_permission
 from app.models import (
     ClassEnrollment,
     DRAFT_STATUSES,
@@ -44,6 +45,7 @@ from app.services.drafts import (
 from app.services.fdm_monster import FdmMonsterError, get_fdm_adapter
 from app.services.filament_api import sync_printer_filament
 from app.services.notifications import notify_job_completed
+from app.services.profiles import read_upload_bounded
 from app.services.serializers import serialize_job
 from app.services.slicer import (
     OutOfBoundsError,
@@ -54,8 +56,10 @@ from app.services.slicer import (
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
+_SAFE_PATH_TOKEN_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
-def _load_job_for_user(db: Session, job_id: int, user: User) -> PrintJob:
+
+def _fetch_job_by_id(db: Session, job_id: int) -> PrintJob:
     job = db.scalar(
         select(PrintJob)
         .where(PrintJob.id == job_id)
@@ -73,10 +77,25 @@ def _load_job_for_user(db: Session, job_id: int, user: User) -> PrintJob:
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "JOB_NOT_FOUND", "message": "Print job not found"},
         )
+    return job
+
+
+def _load_job_for_owner(db: Session, job_id: int, user: User) -> PrintJob:
+    job = _fetch_job_by_id(db, job_id)
+    if job.user_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "FORBIDDEN", "message": "Only the job owner can perform this action"},
+        )
+    return job
+
+
+def _load_job_for_read(db: Session, job_id: int, user: User) -> PrintJob:
+    job = _fetch_job_by_id(db, job_id)
     can_access = (
         job.user_id == user.id
-        or user.role == "admin"
-        or (user.role == "teacher" and job.teacher_id == user.id)
+        or has_permission(user, Permission.APPROVALS_MANAGE_ALL)
+        or (has_permission(user, Permission.APPROVALS_MANAGE_OWN) and job.teacher_id == user.id)
     )
     if not can_access:
         raise HTTPException(
@@ -133,20 +152,12 @@ async def upload_stl_job(
             detail={"code": "INVALID_FILE_TYPE", "message": "Only .stl files are supported"},
         )
 
-    raw_bytes = await file.read()
     max_bytes = int(sys_settings.max_upload_mb) * 1024 * 1024
+    raw_bytes = await read_upload_bounded(file, max_bytes)
     if len(raw_bytes) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "EMPTY_FILE", "message": "Uploaded STL file is empty"},
-        )
-    if len(raw_bytes) > max_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail={
-                "code": "FILE_TOO_LARGE",
-                "message": f"File exceeds max upload size of {sys_settings.max_upload_mb} MB",
-            },
         )
 
     printer, slot = _validate_printer_and_slot(db, printer_id, slot_id)
@@ -194,7 +205,7 @@ async def upload_stl_job(
     db.commit()
     db.refresh(job)
 
-    loaded = _load_job_for_user(db, job.id, current_user)
+    loaded = _load_job_for_owner(db, job.id, current_user)
     return serialize_job(db, loaded, sys_settings)
 
 
@@ -206,7 +217,7 @@ def reorient_job(
 ) -> JobDetail:
     """Re-run server auto-orient on original.stl and reset transform to centered identity."""
     sys_settings = get_system_settings(db)
-    job = _load_job_for_user(db, job_id, current_user)
+    job = _load_job_for_owner(db, job_id, current_user)
     if job.status not in (JobStatus.DRAFT.value, JobStatus.SLICED.value, JobStatus.REJECTED.value):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -235,7 +246,7 @@ def reorient_job(
     job.gcode_filename = None
     db.commit()
     db.refresh(job)
-    return serialize_job(db, _load_job_for_user(db, job.id, current_user), sys_settings)
+    return serialize_job(db, _load_job_for_owner(db, job.id, current_user), sys_settings)
 
 
 @router.get("/{job_id}/mesh")
@@ -244,8 +255,8 @@ def get_job_oriented_mesh(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> FileResponse:
-    """Stream the auto-oriented STL binary for the owner or admin."""
-    job = _load_job_for_user(db, job_id, current_user)
+    """Stream the auto-oriented STL binary for the owner or authorized reviewer."""
+    job = _load_job_for_read(db, job_id, current_user)
     mesh_path = Path(job.oriented_stl_path)
     if not mesh_path.exists():
         raise HTTPException(
@@ -262,7 +273,7 @@ def get_job_stl(
     db: Session = Depends(get_db),
 ) -> FileResponse:
     """Stream the stored STL file for the owner, assigned teacher, or admin."""
-    job = _load_job_for_user(db, job_id, current_user)
+    job = _load_job_for_read(db, job_id, current_user)
     stl_path = Path(job.oriented_stl_path) if job.oriented_stl_path else None
     if stl_path is None or not stl_path.exists():
         stl_path = Path(job.original_stl_path) if job.original_stl_path else None
@@ -285,7 +296,7 @@ def get_job_gcode(
     db: Session = Depends(get_db),
 ) -> FileResponse:
     """Stream the sliced G-code text file for the owner, assigned teacher, or admin."""
-    job = _load_job_for_user(db, job_id, current_user)
+    job = _load_job_for_read(db, job_id, current_user)
     gcode_path = Path(job.sliced_output_path) if job.sliced_output_path else None
     if gcode_path is None or not gcode_path.exists():
         raise HTTPException(
@@ -308,7 +319,7 @@ async def slice_job(
 ) -> JobDetail:
     """Validate bed bounds, bake student transform, and slice using admin profiles."""
     sys_settings = get_system_settings(db)
-    job = _load_job_for_user(db, job_id, current_user)
+    job = _load_job_for_owner(db, job_id, current_user)
     if job.status not in (JobStatus.DRAFT.value, JobStatus.SLICED.value, JobStatus.REJECTED.value):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -325,8 +336,14 @@ async def slice_job(
         await sync_printer_filament(db, printer, sys_settings, target_slot=slot)
 
     job_dir = Path(job.oriented_stl_path).parent
-    stem = Path(job.original_filename).stem
-    gcode_path = job_dir / f"{stem}_{printer.fdm_monster_id}_slot{slot.slot_index}.gcode"
+    safe_stem = _SAFE_PATH_TOKEN_RE.sub("_", Path(job.original_filename).stem).strip("._-") or "model"
+    safe_printer_id = _SAFE_PATH_TOKEN_RE.sub("_", str(printer.fdm_monster_id or "printer")).strip("._-") or "printer"
+    gcode_path = job_dir / f"{safe_stem}_{safe_printer_id}_slot{slot.slot_index}.gcode"
+    if not gcode_path.resolve().is_relative_to(job_dir.resolve()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_PATH", "message": "Invalid output G-code path"},
+        )
 
     try:
         result = run_slice(
@@ -381,7 +398,7 @@ async def slice_job(
 
     db.commit()
     db.refresh(job)
-    return serialize_job(db, _load_job_for_user(db, job.id, current_user), sys_settings)
+    return serialize_job(db, _load_job_for_owner(db, job.id, current_user), sys_settings)
 
 
 @router.post("/{job_id}/submit", response_model=JobDetail)
@@ -392,7 +409,7 @@ async def submit_job(
 ) -> JobDetail:
     """Atomically verify active budget & duration limit, then queue job in FDM Monster."""
     sys_settings = get_system_settings(db)
-    job = _load_job_for_user(db, job_id, current_user)
+    job = _load_job_for_owner(db, job_id, current_user)
     if job.status != JobStatus.SLICED.value or job.estimated_grams is None or job.estimated_minutes is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -443,7 +460,7 @@ async def submit_job(
     job.submitted_at = utcnow()
     db.commit()
     db.refresh(job)
-    return serialize_job(db, _load_job_for_user(db, job.id, current_user), sys_settings)
+    return serialize_job(db, _load_job_for_owner(db, job.id, current_user), sys_settings)
 
 
 @router.post("/{job_id}/request-approval", response_model=JobDetail)
@@ -455,7 +472,7 @@ def request_job_approval(
 ) -> JobDetail:
     """Reserve active grams and route a sliced job in PENDING_APPROVAL to a teacher."""
     sys_settings = get_system_settings(db)
-    job = _load_job_for_user(db, job_id, current_user)
+    job = _load_job_for_owner(db, job_id, current_user)
     if job.status != JobStatus.SLICED.value or job.estimated_grams is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -532,7 +549,7 @@ def request_job_approval(
     job.submitted_at = utcnow()
     db.commit()
     db.refresh(job)
-    return serialize_job(db, _load_job_for_user(db, job.id, current_user), sys_settings)
+    return serialize_job(db, _load_job_for_owner(db, job.id, current_user), sys_settings)
 
 
 @router.get("/mine", response_model=MyJobsResponse)
@@ -608,7 +625,7 @@ async def cancel_job(
 ) -> JobDetail:
     """Cancel an active job (PENDING_APPROVAL, QUEUED, PRINTING) and refund its active grams."""
     sys_settings = get_system_settings(db)
-    job = _load_job_for_user(db, job_id, current_user)
+    job = _load_job_for_read(db, job_id, current_user)
     cancellable = (
         JobStatus.PENDING_APPROVAL.value,
         JobStatus.QUEUED.value,
@@ -634,7 +651,7 @@ async def cancel_job(
     job.completed_at = utcnow()
     db.commit()
     db.refresh(job)
-    return serialize_job(db, _load_job_for_user(db, job.id, current_user), sys_settings)
+    return serialize_job(db, _load_job_for_read(db, job.id, current_user), sys_settings)
 
 
 @router.post("/{job_id}/dev-complete", response_model=JobDetail)
@@ -644,6 +661,14 @@ async def dev_complete_job(
     db: Session = Depends(get_db),
 ) -> JobDetail:
     """Mock-mode helper: mark a QUEUED/PRINTING job COMPLETED so active grams auto-refund immediately."""
+    if not settings.dev_seed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "DEV_ENDPOINT_DISABLED",
+                "message": "dev-complete is disabled when dev_seed is false",
+            },
+        )
     sys_settings = get_system_settings(db)
     if sys_settings.fdm_monster_mode != "mock":
         raise HTTPException(
@@ -651,7 +676,7 @@ async def dev_complete_job(
             detail={"code": "NOT_IN_MOCK_MODE", "message": "dev-complete is only available when fdm_monster_mode is 'mock'"},
         )
 
-    job = _load_job_for_user(db, job_id, current_user)
+    job = _load_job_for_read(db, job_id, current_user)
     if job.status not in (JobStatus.QUEUED.value, JobStatus.PRINTING.value):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -667,6 +692,6 @@ async def dev_complete_job(
     job.completed_at = utcnow()
     db.commit()
     db.refresh(job)
-    loaded = _load_job_for_user(db, job.id, current_user)
+    loaded = _load_job_for_read(db, job.id, current_user)
     await notify_job_completed(loaded)
     return serialize_job(db, loaded, sys_settings)

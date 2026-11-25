@@ -3,15 +3,41 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
 
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_DIR.parent
+DEFAULT_JWT_SECRET = "ggprint-dev-secret-key-change-in-production-001"
+
+
+def detect_app_version() -> str:
+    """Detect GGPrint version from .ggprint-version file or backend/pyproject.toml."""
+    version_file = REPO_ROOT / ".ggprint-version"
+    try:
+        if version_file.is_file():
+            val = version_file.read_text(encoding="utf-8").strip().lstrip("vV")
+            if val:
+                return val
+    except OSError:
+        pass
+
+    pyproject = BACKEND_DIR / "pyproject.toml"
+    try:
+        if pyproject.is_file():
+            text = pyproject.read_text(encoding="utf-8")
+            m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+            if m:
+                return m.group(1).strip()
+    except OSError:
+        pass
+    return "1.0.0"
 
 
 def detect_orca_cli_path(preferred_path: Optional[str] = None) -> Optional[str]:
@@ -126,11 +152,24 @@ class Settings(BaseSettings):
     )
 
     database_url: str = "sqlite:///./data/ggprint.db"
-    jwt_secret: str = "ggprint-dev-secret-key-change-in-production-001"
+    jwt_secret: str = DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24 * 7
 
-    dev_seed: bool = True
+    app_version: str = Field(default_factory=detect_app_version)
+    github_repo: str = "yashTheBabyDragon/GGPrint-Web"
+    github_token: Optional[str] = None
+
+    @field_validator("app_version", mode="before")
+    @classmethod
+    def _normalize_app_version(cls, value: object) -> str:
+        if isinstance(value, str):
+            cleaned = value.strip().lstrip("vV")
+            if cleaned:
+                return cleaned
+        return detect_app_version()
+
+    dev_seed: bool = False
     institution: str = "Cégep Gérald-Godin"
 
     data_dir: Path = BACKEND_DIR / "data"

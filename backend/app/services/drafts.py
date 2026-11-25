@@ -28,20 +28,24 @@ def delete_job_with_files(db: Session, job: PrintJob, *, commit: bool = True) ->
     raw_paths = [job.original_stl_path, job.oriented_stl_path, job.sliced_output_path]
     candidate_dirs: set[Path] = set()
 
+    try:
+        jobs_root = settings.jobs_dir.resolve()
+    except OSError:
+        jobs_root = None
+
     for raw in raw_paths:
         if not raw:
             continue
         file_path = Path(raw)
         try:
-            file_path.unlink(missing_ok=True)
+            resolved = file_path.resolve()
+            if jobs_root is not None and resolved.is_relative_to(jobs_root):
+                resolved.unlink(missing_ok=True)
+                candidate_dirs.add(resolved.parent)
+            else:
+                logger.warning("Refusing to unlink job file outside jobs_dir: %s", file_path)
         except OSError as exc:
             logger.warning("Failed to remove job file %s: %s", file_path, exc)
-        candidate_dirs.add(file_path.parent)
-
-    try:
-        jobs_root = settings.jobs_dir.resolve()
-    except OSError:
-        jobs_root = None
 
     if jobs_root is not None:
         for parent in candidate_dirs:

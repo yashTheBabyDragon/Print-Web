@@ -461,6 +461,18 @@ export interface SystemSettings {
   filament_api_url: string;
 }
 
+export interface SystemUpdateStatus {
+  current_version: string;
+  latest_version?: string | null;
+  update_available: boolean;
+  release_url?: string | null;
+  release_notes?: string | null;
+  published_at?: string | null;
+  checked_at: string;
+  repo: string;
+  error?: string | null;
+}
+
 export interface FilamentApiPrinter {
   id: string;
   type: string;

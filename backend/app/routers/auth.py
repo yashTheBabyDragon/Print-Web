@@ -84,15 +84,11 @@ def check_da(da: str, db: Session = Depends(get_db)) -> CheckDaOut:
     wl = db.get(DAWhitelist, cleaned)
     in_roster = bool(enrollments) or wl is not None
 
-    suggested_name = next((e.suggested_name for e in enrollments if e.suggested_name), None)
-    if suggested_name is None and wl is not None:
-        suggested_name = wl.suggested_name
-
     return CheckDaOut(
         da=cleaned,
         is_registered=is_registered,
         in_roster=in_roster,
-        suggested_name=suggested_name,
+        suggested_name=None,
     )
 
 
@@ -251,8 +247,10 @@ def logout(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, int]:
-    """Delete all unsubmitted drafts (DRAFT / SLICED) for the current user on logout."""
+    """Revoke active tokens and delete all unsubmitted drafts (DRAFT / SLICED) on logout."""
+    current_user.token_version = int(getattr(current_user, "token_version", 0)) + 1
     deleted = delete_user_drafts(db, current_user.id)
+    db.commit()
     return {"deleted": deleted}
 
 
@@ -326,4 +324,10 @@ async def test_my_webhook(
 
     payload = build_test_webhook_payload(current_user, url)
     ok, status_code, error = await post_webhook(url, payload)
-    return WebhookTestResponse(ok=ok, status_code=status_code, error=error)
+    safe_error = error
+    if not ok and error:
+        if "blocked" in error.lower():
+            safe_error = "Blocked webhook target"
+        elif status_code is None:
+            safe_error = "Webhook request failed"
+    return WebhookTestResponse(ok=ok, status_code=status_code, error=safe_error)

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import trimesh
+from fastapi import HTTPException, UploadFile, status
 
 from app.config import settings
 from app.models import OrcaProfile, Printer, PrinterSlot, ProfileKind, SystemSettings
@@ -22,6 +23,32 @@ from app.services.slicer import (
     resolve_and_flatten_profile,
     run_slice,
 )
+
+_UPLOAD_CHUNK_SIZE = 64 * 1024  # 64 KB
+MAX_ZIP_ENTRIES = 200
+MAX_ZIP_ENTRY_BYTES = 2 * 1024 * 1024  # 2 MB per archive entry
+MAX_ZIP_TOTAL_BYTES = 20 * 1024 * 1024  # 20 MB cumulative decompressed bytes
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+async def read_upload_bounded(upload: UploadFile, max_bytes: int) -> bytes:
+    """Read an UploadFile in 64KB chunks and raise HTTP 413 immediately if max_bytes is exceeded."""
+    buf = bytearray()
+    while True:
+        chunk = await upload.read(_UPLOAD_CHUNK_SIZE)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            max_mb = max(1, (max_bytes + (1024 * 1024) - 1) // (1024 * 1024))
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail={
+                    "code": "FILE_TOO_LARGE",
+                    "message": f"File exceeds max upload size of {max_mb} MB",
+                },
+            )
+    return bytes(buf)
 
 _HEX_COLOR_RE = re.compile(r"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$")
 _FILAMENT_HINT_KEYS = frozenset(
@@ -86,8 +113,12 @@ def extract_orca_filament_entries(filename: str, content: bytes) -> list[tuple[s
             raise ValueError("Invalid .orca_filament / .zip archive") from exc
 
         entries: list[tuple[str, bytes]] = []
+        total_uncompressed = 0
         with zf:
-            for info in zf.infolist():
+            infos = zf.infolist()
+            if len(infos) > MAX_ZIP_ENTRIES:
+                raise ValueError(f"Archive exceeds maximum allowed entry count ({MAX_ZIP_ENTRIES})")
+            for info in infos:
                 if info.is_dir():
                     continue
                 member_path = info.filename.replace("\\", "/")
@@ -95,7 +126,20 @@ def extract_orca_filament_entries(filename: str, content: bytes) -> list[tuple[s
                     continue
                 if not member_path.lower().endswith(".json"):
                     continue
-                entries.append((Path(member_path).name, zf.read(info)))
+                if info.file_size > MAX_ZIP_ENTRY_BYTES:
+                    raise ValueError(
+                        f"Archive entry '{Path(member_path).name}' exceeds maximum uncompressed size of 2 MB"
+                    )
+                with zf.open(info, "r") as member_stream:
+                    data = member_stream.read(MAX_ZIP_ENTRY_BYTES + 1)
+                if len(data) > MAX_ZIP_ENTRY_BYTES:
+                    raise ValueError(
+                        f"Archive entry '{Path(member_path).name}' exceeds maximum uncompressed size of 2 MB"
+                    )
+                total_uncompressed += len(data)
+                if total_uncompressed > MAX_ZIP_TOTAL_BYTES:
+                    raise ValueError("Archive exceeds maximum total uncompressed size of 20 MB")
+                entries.append((Path(member_path).name, data))
 
         if not entries:
             raise ValueError("Archive does not contain any .json filament profile files")
@@ -187,9 +231,15 @@ def save_profile_file(filename: str, content: bytes, kind: Optional[str] = None)
         out_bytes = content
 
     settings.ensure_directories()
-    safe_name = Path(filename).name or "profile.json"
+    raw_name = Path(filename or "profile.json").name
+    safe_name = _SAFE_FILENAME_RE.sub("_", raw_name).strip("._-") or "profile.json"
+    if not safe_name.lower().endswith(".json"):
+        safe_name = f"{safe_name}.json"
     stored_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
-    dest = settings.profiles_dir / stored_name
+    profiles_root = settings.profiles_dir.resolve()
+    dest = (settings.profiles_dir / stored_name).resolve()
+    if not dest.is_relative_to(profiles_root):
+        raise ValueError("Invalid profile filename")
     dest.write_bytes(out_bytes)
     return dest
 
@@ -227,10 +277,13 @@ def test_slice_calibration_cube(
 
 
 def delete_profile_file(profile: OrcaProfile) -> None:
-    """Remove profile JSON file from disk if present."""
+    """Remove profile JSON file from disk if present and contained within profiles_dir."""
     try:
-        path = Path(profile.file_path)
-        if path.exists():
-            path.unlink()
+        profiles_root = settings.profiles_dir.resolve()
+        resolved = Path(profile.file_path).resolve()
+        if not resolved.is_relative_to(profiles_root):
+            return
+        if resolved.exists():
+            resolved.unlink()
     except OSError:
         pass

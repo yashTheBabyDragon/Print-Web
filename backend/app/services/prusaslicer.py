@@ -12,6 +12,9 @@ from typing import Any, Literal, Optional
 _HEX_COLOR_RE = re.compile(r"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$")
 _SECTION_RE = re.compile(r"^\[([^\]]+)\]$")
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+MAX_ZIP_ENTRIES = 200
+MAX_ZIP_ENTRY_BYTES = 2 * 1024 * 1024  # 2 MB per archive entry
+MAX_ZIP_TOTAL_BYTES = 20 * 1024 * 1024  # 20 MB cumulative decompressed bytes
 
 _GCODE_KEYS = frozenset(
     {
@@ -155,8 +158,12 @@ def extract_prusaslicer_ini_entries(filename: str, content: bytes) -> list[tuple
             raise ValueError("Invalid .zip archive") from exc
 
         entries: list[tuple[str, bytes]] = []
+        total_uncompressed = 0
         with zf:
-            for info in zf.infolist():
+            infos = zf.infolist()
+            if len(infos) > MAX_ZIP_ENTRIES:
+                raise ValueError(f"Archive exceeds maximum allowed entry count ({MAX_ZIP_ENTRIES})")
+            for info in infos:
                 if info.is_dir():
                     continue
                 member_path = info.filename.replace("\\", "/")
@@ -164,7 +171,20 @@ def extract_prusaslicer_ini_entries(filename: str, content: bytes) -> list[tuple
                     continue
                 if not member_path.lower().endswith(".ini"):
                     continue
-                entries.append((Path(member_path).name, zf.read(info)))
+                if info.file_size > MAX_ZIP_ENTRY_BYTES:
+                    raise ValueError(
+                        f"Archive entry '{Path(member_path).name}' exceeds maximum uncompressed size of 2 MB"
+                    )
+                with zf.open(info, "r") as member_stream:
+                    data = member_stream.read(MAX_ZIP_ENTRY_BYTES + 1)
+                if len(data) > MAX_ZIP_ENTRY_BYTES:
+                    raise ValueError(
+                        f"Archive entry '{Path(member_path).name}' exceeds maximum uncompressed size of 2 MB"
+                    )
+                total_uncompressed += len(data)
+                if total_uncompressed > MAX_ZIP_TOTAL_BYTES:
+                    raise ValueError("Archive exceeds maximum total uncompressed size of 20 MB")
+                entries.append((Path(member_path).name, data))
 
         if not entries:
             raise ValueError("Archive does not contain any .ini files")

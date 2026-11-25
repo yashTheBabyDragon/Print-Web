@@ -121,6 +121,7 @@ class User(Base):
     notify_webhook_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     permissions_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     budget_reset_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     jobs: Mapped[list[PrintJob]] = relationship(

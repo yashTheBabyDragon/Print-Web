@@ -32,6 +32,7 @@ import type {
   SampleModel,
   StudentAccount,
   SystemSettings,
+  SystemUpdateStatus,
   TeacherClass,
   TeacherPublic,
   TestSliceResult,
@@ -421,13 +422,17 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  // Admin: Settings
+  // Admin: Settings & System Updates
   adminGetSettings: () => request<SystemSettings>('/api/admin/settings'),
   adminUpdateSettings: (data: Partial<SystemSettings>) =>
     request<SystemSettings>('/api/admin/settings', {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
+  adminGetUpdateStatus: (force = false) =>
+    request<SystemUpdateStatus>(
+      `/api/admin/system/update-status?force=${force ? 'true' : 'false'}`
+    ),
 
   // Admin: FilamentAPI
   adminTestFilamentApi: (url?: string) =>
