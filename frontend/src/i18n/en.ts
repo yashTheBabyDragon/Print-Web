@@ -39,6 +39,9 @@ export const en: Translations = {
     roleTeacher: 'Teacher',
     activeBudget: 'Active budget',
     budgetTooltip: 'Active filament weight reserved against your limit',
+    menu: 'Menu',
+    openMenu: 'Open menu',
+    closeMenu: 'Close menu',
   },
   status: {
     DRAFT: 'Draft',
@@ -239,6 +242,10 @@ export const en: Translations = {
   admin: {
     title: 'Administration',
     subtitle: 'Printers, filaments, OrcaSlicer profiles, students, and approvals.',
+    mobileWarningTitle: 'Desktop screen required',
+    mobileWarningDesc:
+      'The teacher and administrator dashboard requires a larger screen (tablet or desktop) to manage printers, classes, and approvals.',
+    backToStudentView: 'Back to Print Studio',
     tabs: {
       printers: 'Printers & MMU',
       filaments: 'Filaments & Profiles',

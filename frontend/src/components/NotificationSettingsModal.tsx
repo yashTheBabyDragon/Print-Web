@@ -192,9 +192,9 @@ export function NotificationSettingsModal({ open, onClose }: NotificationSetting
       onPointerUp={handlePointerUp}
       className="gg-dialog w-full max-w-lg"
     >
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <div className="flex items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <h1
               id="notifications-dialog-title"
               className="text-base font-semibold tracking-tight text-[#111318] dark:text-[#F4F5F7]"
@@ -209,7 +209,7 @@ export function NotificationSettingsModal({ open, onClose }: NotificationSetting
             type="button"
             onClick={() => dialogRef.current?.close()}
             aria-label={t.common.close}
-            className="btn-ghost p-1"
+            className="btn-ghost shrink-0 p-2 sm:p-1.5"
           >
             <X className="h-4 w-4" />
           </button>
@@ -231,11 +231,11 @@ export function NotificationSettingsModal({ open, onClose }: NotificationSetting
 
         <form onSubmit={handleSave} className="mt-5 space-y-5">
           {/* Browser Notifications */}
-          <div className="rounded-xl border border-black/[0.08] p-4 dark:border-white/[0.09]">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-2.5">
+          <div className="rounded-xl border border-black/[0.08] p-3.5 sm:p-4 dark:border-white/[0.09]">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex min-w-0 items-start gap-2.5">
                 <Bell className="mt-0.5 h-4 w-4 shrink-0 text-[#00A7D9]" />
-                <div>
+                <div className="min-w-0">
                   <div className="text-sm font-medium text-[#111318] dark:text-[#F4F5F7]">
                     {t.notifications.browserTitle}
                   </div>
@@ -246,12 +246,12 @@ export function NotificationSettingsModal({ open, onClose }: NotificationSetting
               </div>
 
               {permission !== 'unsupported' && (
-                <div className="flex shrink-0 items-center gap-1.5">
+                <div className="flex shrink-0 flex-wrap items-center gap-2 sm:gap-1.5">
                   {browserActive && (
                     <button
                       type="button"
                       onClick={handleTestBrowser}
-                      className="btn-ghost px-2.5 py-1 text-xs"
+                      className="btn-ghost flex-1 px-3 py-2 text-xs sm:flex-none sm:px-2.5 sm:py-1"
                     >
                       {t.notifications.browserTestBtn}
                     </button>
@@ -262,8 +262,8 @@ export function NotificationSettingsModal({ open, onClose }: NotificationSetting
                     onClick={handleToggleBrowser}
                     className={
                       browserActive
-                        ? 'btn-secondary px-3 py-1 text-xs text-emerald-700 dark:text-emerald-400'
-                        : 'btn-primary px-3 py-1 text-xs'
+                        ? 'btn-secondary flex-1 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400 sm:flex-none sm:py-1'
+                        : 'btn-primary flex-1 px-3 py-2 text-xs sm:flex-none sm:py-1'
                     }
                   >
                     {browserActive
@@ -287,7 +287,7 @@ export function NotificationSettingsModal({ open, onClose }: NotificationSetting
           </div>
 
           {/* Webhook */}
-          <div className="rounded-xl border border-black/[0.08] p-4 dark:border-white/[0.09]">
+          <div className="rounded-xl border border-black/[0.08] p-3.5 sm:p-4 dark:border-white/[0.09]">
             <div className="flex items-start gap-2.5">
               <Webhook className="mt-0.5 h-4 w-4 shrink-0 text-[#00A7D9]" />
               <div className="min-w-0 flex-1">
@@ -312,13 +312,13 @@ export function NotificationSettingsModal({ open, onClose }: NotificationSetting
                       setSavedNotice(null);
                     }}
                     placeholder={t.notifications.webhookPlaceholder}
-                    className="studio-input flex-1 font-mono text-xs"
+                    className="studio-input min-w-0 flex-1 font-mono text-base sm:text-xs"
                   />
                   <button
                     type="button"
                     disabled={testingWebhook || !webhookUrl.trim()}
                     onClick={handleTestWebhook}
-                    className="btn-secondary shrink-0 px-3 py-2 text-xs"
+                    className="btn-secondary w-full shrink-0 px-3 py-2 text-xs sm:w-auto"
                   >
                     {testingWebhook ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -346,15 +346,15 @@ export function NotificationSettingsModal({ open, onClose }: NotificationSetting
             </div>
           </div>
 
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:justify-end">
             <button
               type="button"
               onClick={() => dialogRef.current?.close()}
-              className="btn-secondary"
+              className="btn-secondary w-full sm:w-auto"
             >
               {t.common.close}
             </button>
-            <button type="submit" disabled={saving} className="btn-primary">
+            <button type="submit" disabled={saving} className="btn-primary w-full sm:w-auto">
               {saving ? t.common.saving : t.common.save}
             </button>
           </div>

@@ -15,6 +15,7 @@ import {
   RotateCcw,
   RotateCw,
   Upload,
+  X,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { useTheme } from '../context/ThemeContext';
@@ -209,6 +210,12 @@ export function BuildPlate3D({
   const isDraggingGizmoRef = useRef(false);
   const lastBuiltScaleRef = useRef(1.0);
 
+  const [isMobileViewport, setIsMobileViewport] = useState(
+    () => (typeof window !== 'undefined' ? window.innerWidth < 768 : false)
+  );
+  const isMobileViewportRef = useRef(isMobileViewport);
+  isMobileViewportRef.current = isMobileViewport;
+
   const [activeTool, setActiveTool] = useState<ToolMode | null>('move');
   const activeToolRef = useRef<ToolMode | null>(activeTool);
   activeToolRef.current = activeTool;
@@ -307,16 +314,17 @@ export function BuildPlate3D({
     const scaleGizmo = scaleGizmoRef.current;
     const layOverlay = layOverlayRef.current;
     const hasMesh = Boolean(pivot && meshRef.current);
+    const effectiveTool = isMobileViewportRef.current ? null : tool;
 
     if (layOverlay) {
-      layOverlay.group.visible = tool === 'snap' && hasMesh;
-      if (tool !== 'snap') {
+      layOverlay.group.visible = effectiveTool === 'snap' && hasMesh;
+      if (effectiveTool !== 'snap') {
         layOverlay.setHoveredObject(null);
       }
     }
 
     if (scaleGizmo) {
-      if (tool === 'scale' && meshRef.current && pivot && cameraRef.current) {
+      if (effectiveTool === 'scale' && meshRef.current && pivot && cameraRef.current) {
         scaleGizmo.group.visible = true;
         pivot.updateMatrixWorld(true);
         const box = getExactMeshBox(meshRef.current);
@@ -336,26 +344,46 @@ export function BuildPlate3D({
 
     if (!tc) return;
 
-    if (!hasMesh || !pivot || tool === null || tool === 'snap' || tool === 'scale') {
+    if (
+      !hasMesh ||
+      !pivot ||
+      effectiveTool === null ||
+      effectiveTool === 'snap' ||
+      effectiveTool === 'scale'
+    ) {
       tc.detach();
       return;
     }
 
     tc.attach(pivot);
-    if (tool === 'move') {
+    if (effectiveTool === 'move') {
       tc.setMode('translate');
       tc.setSpace('world');
       tc.showX = true;
       tc.showY = true;
       tc.showZ = false;
-    } else if (tool === 'rotate') {
+    } else if (effectiveTool === 'rotate') {
       tc.setMode('rotate');
       tc.setSpace('world');
       tc.showX = true;
       tc.showY = true;
       tc.showZ = true;
     }
-  }, []);
+  }, [getExactMeshBox]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mql = window.matchMedia('(max-width: 767px)');
+    const syncViewport = () => {
+      const mobile = mql.matches;
+      isMobileViewportRef.current = mobile;
+      setIsMobileViewport(mobile);
+      configureGizmoForTool(activeToolRef.current);
+    };
+    syncViewport();
+    mql.addEventListener('change', syncViewport);
+    return () => mql.removeEventListener('change', syncViewport);
+  }, [configureGizmoForTool]);
 
   // Initialize Three.js Scene + TransformControls once
   useEffect(() => {
@@ -381,6 +409,7 @@ export function BuildPlate3D({
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.02;
+    renderer.domElement.style.touchAction = 'none';
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
@@ -434,13 +463,19 @@ export function BuildPlate3D({
     pivotGroup.add(layOverlay.group);
     layOverlayRef.current = layOverlay;
 
+    const isCoarsePointer =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(pointer: coarse)').matches;
+
     const scaleGizmo = new UniformScaleGizmo();
+    scaleGizmo.setTouchMode(isCoarsePointer);
     scaleGizmo.group.visible = false;
     scene.add(scaleGizmo.group);
     scaleGizmoRef.current = scaleGizmo;
 
     const transformControls = new TransformControls(camera, renderer.domElement);
-    transformControls.setSize(0.85);
+    transformControls.setSize(isCoarsePointer ? 1.05 : 0.85);
     scene.add(transformControls.getHelper());
     transformControlsRef.current = transformControls;
 
@@ -505,9 +540,27 @@ export function BuildPlate3D({
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     const bedPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    const activePointerIds = new Set<number>();
     let isDraggingMesh = false;
     const dragOffset = new THREE.Vector2();
-    let snapDownPos: { x: number; y: number } | null = null;
+    let snapDownPos: { x: number; y: number; pointerType: string } | null = null;
+
+    const cancelActiveDrags = () => {
+      if (scaleGizmo.isDragging) {
+        scaleGizmo.endDrag();
+        isDraggingGizmoRef.current = false;
+        syncPivotTransform(transformRef.current);
+      }
+      if (isDraggingMesh) {
+        isDraggingMesh = false;
+      }
+      if (snapDownPos !== null) {
+        snapDownPos = null;
+        layOverlay.setHoveredObject(null);
+      }
+      controls.enabled = !transformControls.dragging;
+      renderer.domElement.style.cursor = 'default';
+    };
 
     const updatePointer = (ev: PointerEvent) => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -540,6 +593,19 @@ export function BuildPlate3D({
     };
 
     const onPointerDown = (ev: PointerEvent) => {
+      activePointerIds.add(ev.pointerId);
+
+      // Mobile viewport is preview-only (orbit/pinch-zoom only, no mesh/gizmo editing).
+      if (isMobileViewportRef.current) {
+        return;
+      }
+
+      // Multi-touch (pinch-zoom / two-finger pan): hand control back to OrbitControls cleanly.
+      if (activePointerIds.size > 1 || !ev.isPrimary) {
+        cancelActiveDrags();
+        return;
+      }
+
       if (ev.button !== 0 || !meshRef.current) return;
 
       if (activeToolRef.current === 'scale') {
@@ -557,7 +623,17 @@ export function BuildPlate3D({
       }
 
       if (activeToolRef.current === 'snap' && layOverlay.group.visible) {
-        snapDownPos = { x: ev.clientX, y: ev.clientY };
+        snapDownPos = { x: ev.clientX, y: ev.clientY, pointerType: ev.pointerType };
+        if (ev.pointerType === 'touch') {
+          updatePointer(ev);
+          raycaster.setFromCamera(pointer, camera);
+          const hits = raycaster.intersectObjects(layOverlay.getPickables(), false);
+          if (hits.length > 0 && layOverlay.getFacetLocalNormal(hits[0].object) !== null) {
+            layOverlay.setHoveredObject(hits[0].object);
+          } else {
+            layOverlay.setHoveredObject(null);
+          }
+        }
         return;
       }
 
@@ -583,7 +659,7 @@ export function BuildPlate3D({
     };
 
     const onPointerMove = (ev: PointerEvent) => {
-      if (!meshRef.current) return;
+      if (isMobileViewportRef.current || !meshRef.current || !ev.isPrimary || activePointerIds.size > 1) return;
 
       updatePointer(ev);
       raycaster.setFromCamera(pointer, camera);
@@ -637,6 +713,16 @@ export function BuildPlate3D({
         return;
       }
 
+      if (snapDownPos !== null) {
+        const threshold = snapDownPos.pointerType === 'touch' ? 14 : 6;
+        if (Math.hypot(ev.clientX - snapDownPos.x, ev.clientY - snapDownPos.y) >= threshold) {
+          snapDownPos = null;
+          layOverlay.setHoveredObject(null);
+        }
+      }
+
+      if (ev.pointerType === 'touch') return;
+
       if (activeToolRef.current === 'scale') {
         const hitGizmo = scaleGizmo.isHit(raycaster);
         scaleGizmo.setHovered(hitGizmo);
@@ -666,6 +752,8 @@ export function BuildPlate3D({
     };
 
     const onPointerUp = (ev: PointerEvent) => {
+      activePointerIds.delete(ev.pointerId);
+
       if (scaleGizmo.isDragging) {
         scaleGizmo.endDrag();
         controls.enabled = !transformControls.dragging;
@@ -677,10 +765,11 @@ export function BuildPlate3D({
       if (snapDownPos !== null) {
         const dx = ev.clientX - snapDownPos.x;
         const dy = ev.clientY - snapDownPos.y;
+        const tapThreshold = snapDownPos.pointerType === 'touch' ? 14 : 6;
         snapDownPos = null;
         if (
           ev.button === 0 &&
-          Math.hypot(dx, dy) < 6 &&
+          Math.hypot(dx, dy) < tapThreshold &&
           activeToolRef.current === 'snap' &&
           layOverlay.group.visible &&
           meshRef.current
@@ -695,6 +784,8 @@ export function BuildPlate3D({
               layOverlay.setHoveredObject(null);
             }
           }
+        } else {
+          layOverlay.setHoveredObject(null);
         }
       }
 
@@ -705,9 +796,15 @@ export function BuildPlate3D({
       }
     };
 
+    const onPointerCancel = (ev: PointerEvent) => {
+      activePointerIds.delete(ev.pointerId);
+      cancelActiveDrags();
+    };
+
     renderer.domElement.addEventListener('pointerdown', onPointerDown, { capture: true });
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
 
     let animId = 0;
     const animate = () => {
@@ -747,6 +844,7 @@ export function BuildPlate3D({
       renderer.domElement.removeEventListener('pointerdown', onPointerDown, { capture: true });
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
       transformControls.removeEventListener('dragging-changed', onDraggingChanged);
       transformControls.removeEventListener('objectChange', onObjectChange);
       transformControls.detach();
@@ -952,9 +1050,10 @@ export function BuildPlate3D({
     configureGizmoForTool(activeTool);
   }, [activeTool, configureGizmoForTool]);
 
-  // Global keyboard shortcuts (M, R, S, F, Escape)
+  // Global keyboard shortcuts (M, R, S, F, Escape) — desktop only
   useEffect(() => {
     const handleKeyDown = (ev: KeyboardEvent) => {
+      if (isMobileViewportRef.current) return;
       if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
       const target = ev.target as HTMLElement | null;
       if (target) {
@@ -1113,6 +1212,17 @@ export function BuildPlate3D({
     if (file) onDropFile(file);
   };
 
+  const activeToolLabel =
+    activeTool === 'move'
+      ? t.workspace.toolbar.move
+      : activeTool === 'rotate'
+        ? t.workspace.toolbar.rotate
+        : activeTool === 'scale'
+          ? t.workspace.toolbar.scale
+          : activeTool === 'snap'
+            ? t.workspace.toolbar.snapFace
+            : '';
+
   return (
     <div
       data-min-z={minZMm.toFixed(3)}
@@ -1120,12 +1230,12 @@ export function BuildPlate3D({
       onDragOver={handleCanvasDragOver}
       onDragLeave={() => setDragOverCanvas(false)}
       onDrop={handleCanvasDrop}
-      className={`relative h-full w-full min-h-[480px] overflow-hidden bg-[#ECEEF2] dark:bg-[#111317] ${
+      className={`relative h-full w-full min-h-[280px] overflow-hidden bg-[#ECEEF2] dark:bg-[#111317] md:min-h-[420px] ${
         bounds.outOfBounds ? 'ring-2 ring-inset ring-rose-500/70' : ''
       }`}
     >
       {/* Full-Bleed Three.js Canvas */}
-      <div ref={containerRef} className="h-full w-full" />
+      <div ref={containerRef} className="h-full w-full touch-none select-none" />
 
       {/* Drag-over Canvas Overlay */}
       {dragOverCanvas && (
@@ -1138,15 +1248,15 @@ export function BuildPlate3D({
 
       {/* Calm Empty Viewport State */}
       {!jobId && !loadingMesh && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
-          <div className="max-w-xs rounded-2xl border border-black/[0.08] bg-white/95 p-6 text-center shadow-sm dark:border-white/[0.09] dark:bg-[#15171C]/95">
-            <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-[#EFEFF3] text-[#5B616E] dark:bg-[#1D2027] dark:text-[#9399A6]">
-              <Upload className="h-5 w-5" />
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-4 sm:p-6">
+          <div className="max-w-xs rounded-2xl border border-black/[0.08] bg-white/95 p-4 text-center shadow-sm dark:border-white/[0.09] dark:bg-[#15171C]/95 sm:p-6">
+            <div className="mx-auto mb-2.5 flex h-9 w-9 items-center justify-center rounded-xl bg-[#EFEFF3] text-[#5B616E] dark:bg-[#1D2027] dark:text-[#9399A6] sm:mb-3 sm:h-10 sm:w-10">
+              <Upload className="h-4 w-4 sm:h-5 sm:w-5" />
             </div>
             <h2 className="text-sm font-semibold text-[#111318] dark:text-[#F4F5F7]">
               {t.workspace.emptyViewportTitle}
             </h2>
-            <p className="mt-1.5 text-xs leading-relaxed text-[#5B616E] dark:text-[#9399A6]">
+            <p className="mt-1 text-xs leading-relaxed text-[#5B616E] dark:text-[#9399A6] sm:mt-1.5">
               {t.workspace.emptyViewportDesc}
             </p>
           </div>
@@ -1163,14 +1273,14 @@ export function BuildPlate3D({
       )}
 
       {meshError && (
-        <div className="absolute bottom-4 left-4 right-4 z-20 rounded-xl bg-rose-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm">
+        <div className="absolute bottom-3 left-3 right-3 z-20 rounded-xl bg-rose-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm sm:bottom-4 sm:left-4 sm:right-4">
           {meshError}
         </div>
       )}
 
       {/* Out of bounds alert (anchored bottom-center so it never collides with top-center toolbar) */}
       {bounds.outOfBounds && (
-        <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-20 flex justify-center">
+        <div className="pointer-events-none absolute bottom-3 left-3 right-3 z-20 flex justify-center sm:bottom-4 sm:left-4 sm:right-4">
           <div className="inline-flex items-center gap-2 rounded-full bg-rose-600 px-3.5 py-1.5 text-xs font-medium text-white shadow-md">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             <span>{t.workspace.outOfBoundsBanner}</span>
@@ -1178,8 +1288,15 @@ export function BuildPlate3D({
         </div>
       )}
 
-      {/* Top-right Quiet Size Readout + Reset Camera */}
-      <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+      {/* Compact bottom-left dimensions readout on mobile/tablet when in bounds */}
+      {jobId && bounds.widthMm > 0 && !bounds.outOfBounds && (
+        <div className="pointer-events-none absolute bottom-2.5 left-2.5 z-10 rounded-lg border border-black/[0.08] bg-white/90 px-2 py-1 font-mono text-[11px] tabular-nums text-[#111318] backdrop-blur-md dark:border-white/[0.09] dark:bg-[#15171C]/90 dark:text-[#F4F5F7] xl:hidden">
+          {bounds.widthMm.toFixed(1)} × {bounds.depthMm.toFixed(1)} × {bounds.heightMm.toFixed(1)} mm
+        </div>
+      )}
+
+      {/* Top-right Quiet Size Readout + Reset Camera (always visible for preview reset) */}
+      <div className="absolute right-2.5 top-2.5 z-10 flex items-center gap-2 md:right-4 md:top-4">
         {jobId && bounds.widthMm > 0 && (
           <div className="hidden rounded-lg border border-black/[0.08] bg-white/90 px-2.5 py-1 font-mono text-xs tabular-nums text-[#111318] backdrop-blur-md dark:border-white/[0.09] dark:bg-[#15171C]/90 dark:text-[#F4F5F7] xl:block">
             {bounds.widthMm.toFixed(1)} × {bounds.depthMm.toFixed(1)} × {bounds.heightMm.toFixed(1)} mm
@@ -1189,29 +1306,32 @@ export function BuildPlate3D({
           type="button"
           onClick={handleResetView}
           title={t.workspace.toolbar.resetView}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-black/[0.08] bg-white/90 px-2.5 py-1 text-xs font-medium text-[#111318] backdrop-blur-md transition-colors hover:bg-white dark:border-white/[0.09] dark:bg-[#15171C]/90 dark:text-[#F4F5F7] dark:hover:bg-[#1D2027]"
+          aria-label={t.workspace.toolbar.resetView}
+          className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1.5 rounded-xl border border-black/[0.08] bg-white/90 px-2.5 py-1 text-xs font-medium text-[#111318] backdrop-blur-md transition-colors hover:bg-white active:scale-95 dark:border-white/[0.09] dark:bg-[#15171C]/90 dark:text-[#F4F5F7] dark:hover:bg-[#1D2027] md:min-h-0 md:min-w-0 md:rounded-lg"
         >
-          <Eye className="h-3.5 w-3.5 text-[#5B616E] dark:text-[#9399A6]" />
+          <Eye className="h-4 w-4 text-[#5B616E] dark:text-[#9399A6] md:h-3.5 md:w-3.5" />
           <span className="hidden 2xl:inline">{t.workspace.toolbar.resetView}</span>
         </button>
       </div>
 
-      {/* Top-Center OrcaSlicer Floating Toolbar + Anchored Contextual Popover */}
-      {jobId && (
-        <div className="pointer-events-none absolute left-1/2 top-4 z-10 flex w-max max-w-[calc(100%-10rem)] -translate-x-1/2 flex-col items-center gap-2">
-          {/* Primary Toolbar */}
-          <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-0.5 whitespace-nowrap rounded-full border border-black/[0.08] bg-white/90 p-1 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/90">
+      {/* Top-Center OrcaSlicer Floating Toolbar + Anchored Contextual Popover (desktop >= 768px only) */}
+      {jobId && !isMobileViewport && (
+        <div className="pointer-events-none absolute left-1/2 top-4 z-10 hidden w-max max-w-[calc(100%-10rem)] -translate-x-1/2 flex-col items-center gap-2 md:flex">
+          {/* Primary Toolbar (scrollable single row with >=44px tap targets on mobile) */}
+          <div className="pointer-events-auto flex max-w-full items-center gap-1 overflow-x-auto rounded-2xl border border-black/[0.08] bg-white/95 p-1 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/95 md:flex-wrap md:justify-center md:gap-0.5 md:overflow-visible md:whitespace-nowrap md:rounded-full md:bg-white/90 md:dark:bg-[#15171C]/90">
             <button
               type="button"
               onClick={() => selectTool('move')}
               title={`${t.workspace.toolbar.move} (M)`}
-              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition-colors ${
+              aria-label={t.workspace.toolbar.move}
+              aria-pressed={activeTool === 'move'}
+              className={`flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors active:scale-95 md:min-h-0 md:min-w-0 md:rounded-full ${
                 activeTool === 'move'
                   ? 'bg-[#00A7D9] text-white'
                   : 'text-[#5B616E] hover:bg-black/[0.05] hover:text-[#111318] dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7]'
               }`}
             >
-              <Move className="h-3.5 w-3.5 shrink-0" />
+              <Move className="h-4 w-4 shrink-0 md:h-3.5 md:w-3.5" />
               <span className="hidden sm:inline">{t.workspace.toolbar.move}</span>
               <span
                 className={`hidden font-mono text-[10px] md:inline ${
@@ -1226,13 +1346,15 @@ export function BuildPlate3D({
               type="button"
               onClick={() => selectTool('rotate')}
               title={`${t.workspace.toolbar.rotate} (R)`}
-              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition-colors ${
+              aria-label={t.workspace.toolbar.rotate}
+              aria-pressed={activeTool === 'rotate'}
+              className={`flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors active:scale-95 md:min-h-0 md:min-w-0 md:rounded-full ${
                 activeTool === 'rotate'
                   ? 'bg-[#00A7D9] text-white'
                   : 'text-[#5B616E] hover:bg-black/[0.05] hover:text-[#111318] dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7]'
               }`}
             >
-              <RotateCw className="h-3.5 w-3.5 shrink-0" />
+              <RotateCw className="h-4 w-4 shrink-0 md:h-3.5 md:w-3.5" />
               <span className="hidden sm:inline">{t.workspace.toolbar.rotate}</span>
               <span
                 className={`hidden font-mono text-[10px] md:inline ${
@@ -1247,13 +1369,15 @@ export function BuildPlate3D({
               type="button"
               onClick={() => selectTool('scale')}
               title={`${t.workspace.toolbar.scale} (S)`}
-              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition-colors ${
+              aria-label={t.workspace.toolbar.scale}
+              aria-pressed={activeTool === 'scale'}
+              className={`flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors active:scale-95 md:min-h-0 md:min-w-0 md:rounded-full ${
                 activeTool === 'scale'
                   ? 'bg-[#00A7D9] text-white'
                   : 'text-[#5B616E] hover:bg-black/[0.05] hover:text-[#111318] dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7]'
               }`}
             >
-              <Maximize2 className="h-3.5 w-3.5 shrink-0" />
+              <Maximize2 className="h-4 w-4 shrink-0 md:h-3.5 md:w-3.5" />
               <span className="hidden sm:inline">{t.workspace.toolbar.scale}</span>
               <span
                 className={`hidden font-mono text-[10px] md:inline ${
@@ -1268,13 +1392,15 @@ export function BuildPlate3D({
               type="button"
               onClick={() => selectTool('snap')}
               title={`${t.workspace.toolbar.snapFace} (F)`}
-              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium transition-colors ${
+              aria-label={t.workspace.toolbar.snapFace}
+              aria-pressed={activeTool === 'snap'}
+              className={`flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium transition-colors active:scale-95 md:min-h-0 md:min-w-0 md:rounded-full ${
                 activeTool === 'snap'
                   ? 'bg-[#00A7D9] text-white'
                   : 'text-[#5B616E] hover:bg-black/[0.05] hover:text-[#111318] dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7]'
               }`}
             >
-              <Magnet className="h-3.5 w-3.5 shrink-0" />
+              <Magnet className="h-4 w-4 shrink-0 md:h-3.5 md:w-3.5" />
               <span className="hidden sm:inline">{t.workspace.toolbar.snapFace}</span>
               <span
                 className={`hidden font-mono text-[10px] md:inline ${
@@ -1285,15 +1411,16 @@ export function BuildPlate3D({
               </span>
             </button>
 
-            <div className="mx-1 hidden h-4 w-px bg-black/[0.1] dark:bg-white/[0.12] sm:block" />
+            <div className="mx-0.5 hidden h-4 w-px shrink-0 bg-black/[0.1] dark:bg-white/[0.12] sm:block md:mx-1" />
 
             <button
               type="button"
               onClick={handleCenter}
               title={t.workspace.toolbar.center}
-              className="flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium text-[#5B616E] transition-colors hover:bg-black/[0.05] hover:text-[#111318] dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7]"
+              aria-label={t.workspace.toolbar.center}
+              className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium text-[#5B616E] transition-colors hover:bg-black/[0.05] hover:text-[#111318] active:scale-95 dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7] md:min-h-0 md:min-w-0 md:rounded-full"
             >
-              <Crosshair className="h-3.5 w-3.5 shrink-0" />
+              <Crosshair className="h-4 w-4 shrink-0 md:h-3.5 md:w-3.5" />
               <span className="hidden lg:inline">{t.workspace.toolbar.center}</span>
             </button>
 
@@ -1303,54 +1430,89 @@ export function BuildPlate3D({
                 onClick={onReorient}
                 disabled={reorienting}
                 title={t.workspace.toolbar.reorient}
-                className="flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-xs font-medium text-[#5B616E] transition-colors hover:bg-black/[0.05] hover:text-[#111318] disabled:opacity-45 dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7]"
+                aria-label={t.workspace.toolbar.reorient}
+                className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium text-[#5B616E] transition-colors hover:bg-black/[0.05] hover:text-[#111318] active:scale-95 disabled:opacity-45 dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7] md:min-h-0 md:min-w-0 md:rounded-full"
               >
-                <Compass className="h-3.5 w-3.5 shrink-0" />
+                <Compass className="h-4 w-4 shrink-0 md:h-3.5 md:w-3.5" />
                 <span className="hidden lg:inline">{t.workspace.toolbar.reorient}</span>
               </button>
             )}
+
+            {/* Mobile inline Reset View button so it never collides with top-center toolbar */}
+            <button
+              type="button"
+              onClick={handleResetView}
+              title={t.workspace.toolbar.resetView}
+              aria-label={t.workspace.toolbar.resetView}
+              className="flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium text-[#5B616E] transition-colors hover:bg-black/[0.05] hover:text-[#111318] active:scale-95 dark:text-[#9399A6] dark:hover:bg-white/[0.07] dark:hover:text-[#F4F5F7] md:hidden"
+            >
+              <Eye className="h-4 w-4 shrink-0" />
+            </button>
           </div>
 
           {/* Anchored Floating Contextual Overlay */}
           {overlayOpen && activeTool !== null && (
-            <div className="pointer-events-auto w-max max-w-[92vw] rounded-2xl border border-black/[0.08] bg-white/90 px-3.5 py-2.5 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/90">
+            <div className="pointer-events-auto max-h-[210px] w-full max-w-[calc(100%-0.25rem)] overflow-y-auto overscroll-contain rounded-2xl border border-black/[0.08] bg-white/95 px-3 py-2.5 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/95 sm:max-h-[250px] md:max-h-none md:w-max md:max-w-[92vw] md:overflow-visible md:bg-white/90 md:px-3.5 md:dark:bg-[#15171C]/90">
+              {/* Mobile header with tool label + dismiss button (replaces hover-only tooltips) */}
+              <div className="mb-2 flex items-center justify-between gap-2 border-b border-black/[0.06] pb-1.5 dark:border-white/[0.07] md:hidden">
+                <span className="text-xs font-semibold text-[#111318] dark:text-[#F4F5F7]">
+                  {activeToolLabel}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setOverlayOpen(false)}
+                  aria-label={t.common.close}
+                  className="-mr-2 -my-1.5 inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg text-[#5B616E] hover:bg-black/[0.05] dark:text-[#9399A6] dark:hover:bg-white/[0.07]"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
               {activeTool === 'move' && (
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <div className="flex items-center gap-1.5 rounded-xl bg-black/[0.04] px-2.5 py-1 dark:bg-white/[0.05]">
-                    <span className="h-2 w-2 rounded-full bg-rose-500" />
-                    <span className="text-xs font-semibold text-rose-600 dark:text-rose-400">
-                      {t.workspace.toolbar.posX}
+                <div className="flex flex-wrap items-center gap-2 md:gap-2.5">
+                  <div className="flex min-h-[40px] flex-1 items-center justify-between gap-1.5 rounded-xl bg-black/[0.04] px-2.5 py-1 dark:bg-white/[0.05] md:min-h-0 md:flex-none">
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-rose-500" />
+                      <span className="text-xs font-semibold text-rose-600 dark:text-rose-400">
+                        {t.workspace.toolbar.posX}
+                      </span>
                     </span>
-                    <NumericInput
-                      value={transform.posX}
-                      step={1}
-                      decimals={1}
-                      ariaLabel="Move X (mm)"
-                      onCommit={(nextX) => onTransformChange({ ...transform, posX: nextX })}
-                      className="no-spinner w-16 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7]"
-                    />
-                    <span className="text-[11px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
+                    <div className="flex items-center gap-1">
+                      <NumericInput
+                        value={transform.posX}
+                        step={1}
+                        decimals={1}
+                        ariaLabel="Move X (mm)"
+                        onCommit={(nextX) => onTransformChange({ ...transform, posX: nextX })}
+                        className="no-spinner w-16 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7]"
+                      />
+                      <span className="text-[11px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-1.5 rounded-xl bg-black/[0.04] px-2.5 py-1 dark:bg-white/[0.05]">
-                    <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                    <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-                      {t.workspace.toolbar.posY}
+                  <div className="flex min-h-[40px] flex-1 items-center justify-between gap-1.5 rounded-xl bg-black/[0.04] px-2.5 py-1 dark:bg-white/[0.05] md:min-h-0 md:flex-none">
+                    <span className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                      <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                        {t.workspace.toolbar.posY}
+                      </span>
                     </span>
-                    <NumericInput
-                      value={transform.posY}
-                      step={1}
-                      decimals={1}
-                      ariaLabel="Move Y (mm)"
-                      onCommit={(nextY) => onTransformChange({ ...transform, posY: nextY })}
-                      className="no-spinner w-16 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7]"
-                    />
-                    <span className="text-[11px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
+                    <div className="flex items-center gap-1">
+                      <NumericInput
+                        value={transform.posY}
+                        step={1}
+                        decimals={1}
+                        ariaLabel="Move Y (mm)"
+                        onCommit={(nextY) => onTransformChange({ ...transform, posY: nextY })}
+                        className="no-spinner w-16 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7]"
+                      />
+                      <span className="text-[11px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
+                    </div>
                   </div>
 
                   <div
                     title={t.workspace.toolbar.zLockedBed}
-                    className="flex items-center gap-1.5 rounded-xl bg-black/[0.03] px-2.5 py-1 opacity-80 dark:bg-white/[0.04]"
+                    className="flex min-h-[40px] items-center gap-1.5 rounded-xl bg-black/[0.03] px-2.5 py-1 opacity-80 dark:bg-white/[0.04] md:min-h-0"
                   >
                     <span className="h-2 w-2 rounded-full bg-sky-500" />
                     <span className="text-xs font-semibold text-sky-600 dark:text-sky-400">
@@ -1365,16 +1527,16 @@ export function BuildPlate3D({
                   <button
                     type="button"
                     onClick={handleCenter}
-                    className="btn-secondary px-2.5 py-1 text-xs"
+                    className="btn-secondary min-h-[44px] px-3 py-1.5 text-xs md:min-h-0 md:px-2.5 md:py-1"
                   >
-                    <Crosshair className="h-3 w-3" />
+                    <Crosshair className="h-3.5 w-3.5 md:h-3 md:w-3" />
                     <span>{t.workspace.toolbar.center}</span>
                   </button>
                 </div>
               )}
 
               {activeTool === 'rotate' && (
-                <div className="w-[min(460px,84vw)] space-y-2.5">
+                <div className="w-full space-y-2.5 md:w-[min(460px,84vw)]">
                   <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
                     {(['x', 'y', 'z'] as const).map((axis) => {
                       const dotClass =
@@ -1430,21 +1592,21 @@ export function BuildPlate3D({
                             step={1}
                             value={eulerDeg[axis]}
                             onChange={(e) => setEulerAxis(axis, Number(e.target.value))}
-                            className="w-full"
+                            className="h-7 w-full touch-pan-x md:h-auto"
                           />
 
-                          <div className="flex items-center gap-1">
+                          <div className="flex items-center gap-1.5">
                             <button
                               type="button"
                               onClick={() => rotateBy90(axis, -1)}
-                              className="btn-secondary flex-1 py-1 font-mono text-[11px]"
+                              className="btn-secondary min-h-[44px] flex-1 py-1 font-mono text-[11px] md:min-h-0"
                             >
                               <RotateCcw className="h-3 w-3" /> -90°
                             </button>
                             <button
                               type="button"
                               onClick={() => rotateBy90(axis, 1)}
-                              className="btn-secondary flex-1 py-1 font-mono text-[11px]"
+                              className="btn-secondary min-h-[44px] flex-1 py-1 font-mono text-[11px] md:min-h-0"
                             >
                               <RotateCw className="h-3 w-3" /> +90°
                             </button>
@@ -1458,7 +1620,7 @@ export function BuildPlate3D({
                     <button
                       type="button"
                       onClick={handleResetRotation}
-                      className="btn-secondary px-2.5 py-1 font-mono text-[11px]"
+                      className="btn-secondary min-h-[44px] px-3 py-1 font-mono text-[11px] md:min-h-0 md:px-2.5"
                     >
                       <RotateCcw className="h-3 w-3" />
                       <span>{t.workspace.toolbar.resetRotation}</span>
@@ -1468,9 +1630,9 @@ export function BuildPlate3D({
               )}
 
               {activeTool === 'scale' && (
-                <div className="w-[min(430px,84vw)] space-y-2.5">
+                <div className="w-full space-y-2.5 md:w-[min(430px,84vw)]">
                   {/* Top Row: Global Scale % */}
-                  <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2 md:gap-2.5">
                     <span className="text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
                       {t.workspace.toolbar.scale}
                     </span>
@@ -1486,9 +1648,9 @@ export function BuildPlate3D({
                           scale: Math.max(MIN_SCALE, Math.min(MAX_SCALE, Number(e.target.value) / 100)),
                         })
                       }
-                      className="min-w-[110px] flex-1"
+                      className="h-7 min-w-[100px] flex-1 touch-pan-x md:h-auto"
                     />
-                    <div className="flex items-center gap-1 rounded-xl bg-black/[0.04] px-2 py-1 dark:bg-white/[0.05]">
+                    <div className="flex min-h-[40px] items-center gap-1 rounded-xl bg-black/[0.04] px-2 py-1 dark:bg-white/[0.05] md:min-h-0">
                       <NumericInput
                         value={Math.round(transform.scale * 100)}
                         min={10}
@@ -1511,7 +1673,7 @@ export function BuildPlate3D({
                     <button
                       type="button"
                       onClick={() => onTransformChange({ ...transform, scale: 1.0 })}
-                      className="btn-secondary px-2 py-1 font-mono text-[11px]"
+                      className="btn-secondary min-h-[44px] px-3 py-1 font-mono text-[11px] md:min-h-0 md:px-2"
                     >
                       100%
                     </button>
@@ -1522,13 +1684,13 @@ export function BuildPlate3D({
                   </div>
 
                   {/* Bottom Row: Linked Uniform X / Y / Z mm inputs */}
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="flex items-center justify-between gap-1 rounded-xl bg-black/[0.04] px-2 py-1 dark:bg-white/[0.05]">
-                      <span className="flex items-center gap-1 text-xs font-semibold">
+                  <div className="grid grid-cols-3 gap-1.5 sm:gap-2">
+                    <div className="flex min-w-0 items-center justify-between gap-1 rounded-xl bg-black/[0.04] px-2 py-1.5 dark:bg-white/[0.05] md:py-1">
+                      <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
                         <span className="h-2 w-2 rounded-full bg-rose-500" />
                         <span className="text-rose-600 dark:text-rose-400">X</span>
                       </span>
-                      <div className="flex items-center gap-0.5">
+                      <div className="flex min-w-0 items-center gap-0.5">
                         <NumericInput
                           value={bounds.widthMm}
                           min={0.5}
@@ -1536,18 +1698,18 @@ export function BuildPlate3D({
                           decimals={1}
                           ariaLabel="Width X (mm)"
                           onCommit={(mm) => handleAxisMmChange('x', mm)}
-                          className="no-spinner w-14 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7]"
+                          className="no-spinner w-full min-w-0 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7] sm:w-14"
                         />
-                        <span className="text-[10px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
+                        <span className="shrink-0 text-[10px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between gap-1 rounded-xl bg-black/[0.04] px-2 py-1 dark:bg-white/[0.05]">
-                      <span className="flex items-center gap-1 text-xs font-semibold">
+                    <div className="flex min-w-0 items-center justify-between gap-1 rounded-xl bg-black/[0.04] px-2 py-1.5 dark:bg-white/[0.05] md:py-1">
+                      <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
                         <span className="h-2 w-2 rounded-full bg-emerald-500" />
                         <span className="text-emerald-600 dark:text-emerald-400">Y</span>
                       </span>
-                      <div className="flex items-center gap-0.5">
+                      <div className="flex min-w-0 items-center gap-0.5">
                         <NumericInput
                           value={bounds.depthMm}
                           min={0.5}
@@ -1555,18 +1717,18 @@ export function BuildPlate3D({
                           decimals={1}
                           ariaLabel="Depth Y (mm)"
                           onCommit={(mm) => handleAxisMmChange('y', mm)}
-                          className="no-spinner w-14 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7]"
+                          className="no-spinner w-full min-w-0 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7] sm:w-14"
                         />
-                        <span className="text-[10px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
+                        <span className="shrink-0 text-[10px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between gap-1 rounded-xl bg-black/[0.04] px-2 py-1 dark:bg-white/[0.05]">
-                      <span className="flex items-center gap-1 text-xs font-semibold">
+                    <div className="flex min-w-0 items-center justify-between gap-1 rounded-xl bg-black/[0.04] px-2 py-1.5 dark:bg-white/[0.05] md:py-1">
+                      <span className="flex shrink-0 items-center gap-1 text-xs font-semibold">
                         <span className="h-2 w-2 rounded-full bg-sky-500" />
                         <span className="text-sky-600 dark:text-sky-400">Z</span>
                       </span>
-                      <div className="flex items-center gap-0.5">
+                      <div className="flex min-w-0 items-center gap-0.5">
                         <NumericInput
                           value={bounds.heightMm}
                           min={0.5}
@@ -1574,9 +1736,9 @@ export function BuildPlate3D({
                           decimals={1}
                           ariaLabel="Height Z (mm)"
                           onCommit={(mm) => handleAxisMmChange('z', mm)}
-                          className="no-spinner w-14 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7]"
+                          className="no-spinner w-full min-w-0 bg-transparent text-right font-mono text-xs tabular-nums text-[#111318] focus:outline-none dark:text-[#F4F5F7] sm:w-14"
                         />
-                        <span className="text-[10px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
+                        <span className="shrink-0 text-[10px] text-[#5B616E] dark:text-[#9399A6]">mm</span>
                       </div>
                     </div>
                   </div>
@@ -1584,7 +1746,7 @@ export function BuildPlate3D({
               )}
 
               {activeTool === 'snap' && (
-                <div className="flex flex-wrap items-center gap-3 text-xs font-medium text-[#111318] dark:text-[#F4F5F7]">
+                <div className="flex flex-wrap items-center gap-2.5 text-xs font-medium text-[#111318] dark:text-[#F4F5F7] md:gap-3">
                   <div className="flex items-center gap-2">
                     <Magnet className="h-4 w-4 shrink-0 text-[#00A7D9]" />
                     <span>
@@ -1596,7 +1758,7 @@ export function BuildPlate3D({
                       type="button"
                       onClick={onReorient}
                       disabled={reorienting}
-                      className="btn-secondary px-2.5 py-1 text-xs"
+                      className="btn-secondary min-h-[44px] px-3 py-1.5 text-xs md:min-h-0 md:px-2.5 md:py-1"
                     >
                       <Compass className="h-3.5 w-3.5" />
                       <span>{t.workspace.toolbar.reorient}</span>

@@ -81,25 +81,25 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
   const canDevComplete = Boolean(authMode?.dev_mode || authMode?.fdm_mode === 'mock');
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 sm:px-6">
+    <div className="mx-auto max-w-5xl space-y-5 px-4 py-5 sm:space-y-6 sm:px-6 sm:py-8">
       {/* Header */}
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-[#111318] dark:text-[#F4F5F7]">
+      <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-tight text-[#111318] dark:text-[#F4F5F7] sm:text-2xl">
             {t.myPrints.title}
           </h1>
           <p className="mt-1 text-sm text-[#5B616E] dark:text-[#9399A6]">
             {t.myPrints.subtitle}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={loadMine} className="btn-secondary">
-            <RefreshCw className="h-4 w-4" />
-            {t.common.refresh}
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
+          <button type="button" onClick={loadMine} className="btn-secondary w-full sm:w-auto">
+            <RefreshCw className="h-4 w-4 shrink-0" />
+            <span>{t.common.refresh}</span>
           </button>
-          <button type="button" onClick={onGoToPrint} className="btn-primary">
-            <Plus className="h-4 w-4" />
-            {t.myPrints.goToPrint}
+          <button type="button" onClick={onGoToPrint} className="btn-primary w-full sm:w-auto">
+            <Plus className="h-4 w-4 shrink-0" />
+            <span>{t.myPrints.goToPrint}</span>
           </button>
         </div>
       </div>
@@ -113,7 +113,7 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
 
       {/* Unified Active Budget Strip */}
       {user && (
-        <div className="studio-surface p-5">
+        <div className="studio-surface p-4 sm:p-5">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <span className="text-sm font-medium text-[#111318] dark:text-[#F4F5F7]">
               {t.myPrints.activeWeightTitle}
@@ -132,7 +132,7 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
             />
           </div>
 
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-[#5B616E] dark:text-[#9399A6]">
+          <div className="mt-3 flex flex-col gap-1.5 text-xs text-[#5B616E] dark:text-[#9399A6] sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:gap-2">
             <span>{t.myPrints.activeWeightHelp}</span>
             <span className="font-mono tabular-nums">
               {t.myPrints.durationPolicyTitle}:{' '}
@@ -153,7 +153,7 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
           {t.common.loading}
         </div>
       ) : jobs.length === 0 ? (
-        <div className="studio-surface p-12 text-center">
+        <div className="studio-surface p-8 text-center sm:p-12">
           <p className="text-sm text-[#5B616E] dark:text-[#9399A6]">{t.myPrints.emptyJobs}</p>
           <button type="button" onClick={onGoToPrint} className="btn-primary mt-4">
             {t.myPrints.goToPrint}
@@ -169,14 +169,14 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
             return (
               <div
                 key={job.id}
-                className="flex flex-col justify-between gap-4 px-5 py-4 sm:flex-row sm:items-center"
+                className="flex flex-col justify-between gap-3.5 px-4 py-4 sm:flex-row sm:items-center sm:gap-4 sm:px-5"
               >
-                <div className="min-w-0 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2.5">
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
                     <span className="font-mono text-xs tabular-nums text-[#8A909E]">
                       #{job.id}
                     </span>
-                    <span className="truncate text-sm font-semibold text-[#111318] dark:text-[#F4F5F7]">
+                    <span className="min-w-0 max-w-full truncate text-sm font-semibold text-[#111318] dark:text-[#F4F5F7]">
                       {job.original_filename || job.filename || `Job #${job.id}`}
                     </span>
                     <JobStatusBadge status={job.status} />
@@ -189,7 +189,7 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
                     {job.filament_name && (
                       <span className="inline-flex items-center gap-1.5">
                         <span
-                          className="h-2.5 w-2.5 rounded-full border border-black/15 dark:border-white/20"
+                          className="h-2.5 w-2.5 shrink-0 rounded-full border border-black/15 dark:border-white/20"
                           style={{ backgroundColor: job.filament_color_hex || '#00A7D9' }}
                         />
                         <span>{job.filament_name}</span>
@@ -211,28 +211,28 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
                   </div>
 
                   {job.student_note && (
-                    <p className="text-xs text-[#5B616E] dark:text-[#9399A6]">
+                    <p className="break-words text-xs text-[#5B616E] dark:text-[#9399A6]">
                       {t.myPrints.studentNoteLabel}: {job.student_note}
                     </p>
                   )}
                   {job.admin_note && (
-                    <p className="text-xs text-[#007BA3] dark:text-[#38C6F4]">
+                    <p className="break-words text-xs text-[#007BA3] dark:text-[#38C6F4]">
                       {t.myPrints.adminNoteLabel}: {job.admin_note}
                     </p>
                   )}
                 </div>
 
                 {(canCancel || canComplete) && (
-                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  <div className="flex flex-col gap-2 sm:shrink-0 sm:flex-row sm:flex-wrap sm:items-center">
                     {canComplete && (
                       <button
                         type="button"
                         disabled={isBusy}
                         onClick={() => handleDevComplete(job.id)}
-                        className="btn-secondary px-3 py-1.5 text-xs text-emerald-700 dark:text-emerald-400"
+                        className="btn-secondary w-full px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400 sm:w-auto sm:py-1.5"
                       >
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        {isBusy ? t.myPrints.devCompleting : t.myPrints.devCompleteBtn}
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                        <span>{isBusy ? t.myPrints.devCompleting : t.myPrints.devCompleteBtn}</span>
                       </button>
                     )}
                     {canCancel && (
@@ -240,10 +240,10 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
                         type="button"
                         disabled={isBusy}
                         onClick={() => handleCancel(job.id)}
-                        className="btn-ghost px-3 py-1.5 text-xs text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400"
+                        className="btn-ghost w-full border border-rose-500/20 px-3 py-2 text-xs text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 sm:w-auto sm:border-transparent sm:py-1.5"
                       >
-                        <XCircle className="h-3.5 w-3.5" />
-                        {isBusy ? t.myPrints.cancelling : t.myPrints.cancelBtn}
+                        <XCircle className="h-3.5 w-3.5 shrink-0" />
+                        <span>{isBusy ? t.myPrints.cancelling : t.myPrints.cancelBtn}</span>
                       </button>
                     )}
                   </div>

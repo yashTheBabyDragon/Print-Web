@@ -42,8 +42,8 @@ const PRINTER_TEXT_CLASSES: Record<PrinterStatus, string> = {
 export function JobStatusBadge({ status }: { status: JobStatus }) {
   const { t } = useI18n();
   return (
-    <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${JOB_TEXT_CLASSES[status]}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${JOB_DOT_CLASSES[status]}`} />
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium ${JOB_TEXT_CLASSES[status]}`}>
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${JOB_DOT_CLASSES[status]}`} />
       <span>{t.status[status]}</span>
     </span>
   );
@@ -52,8 +52,8 @@ export function JobStatusBadge({ status }: { status: JobStatus }) {
 export function PrinterStatusBadge({ status }: { status: PrinterStatus }) {
   const { t } = useI18n();
   return (
-    <span className={`inline-flex items-center gap-1.5 text-[11px] font-medium ${PRINTER_TEXT_CLASSES[status]}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${PRINTER_DOT_CLASSES[status]}`} />
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium ${PRINTER_TEXT_CLASSES[status]}`}>
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${PRINTER_DOT_CLASSES[status]}`} />
       <span>{t.status[status]}</span>
     </span>
   );
