@@ -68,6 +68,7 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
   ]);
   const canManageTeachers = hasPermission(user, PERMISSIONS.TEACHERS_MANAGE);
   const canManageSettings = hasPermission(user, PERMISSIONS.SETTINGS_MANAGE);
+  const canManageUpdates = hasPermission(user, PERMISSIONS.UPDATES_MANAGE);
   const canManageAllClasses = hasPermission(user, PERMISSIONS.CLASSES_MANAGE_ALL);
   const canManageAllApprovals = hasPermission(user, PERMISSIONS.APPROVALS_MANAGE_ALL);
 
@@ -169,8 +170,12 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
     if (canManageTeachers) {
       list.push({ id: 'teachers', label: t.admin.tabs.teachers, icon: GraduationCap });
     }
-    if (canManageSettings) {
-      list.push({ id: 'settings', label: t.admin.tabs.settings, icon: Settings });
+    if (canManageSettings || canManageUpdates) {
+      list.push({
+        id: 'settings',
+        label: canManageSettings ? t.admin.tabs.settings : t.admin.settings.updatesTabLabel,
+        icon: Settings,
+      });
     }
     return list;
   }, [
@@ -182,6 +187,7 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
     canManageApprovals,
     canManageTeachers,
     canManageSettings,
+    canManageUpdates,
     pendingApprovalsCount,
     t,
   ]);
@@ -345,9 +351,11 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
                     onError={setError}
                   />
                 )}
-                {effectiveTab === 'settings' && canManageSettings && (
+                {effectiveTab === 'settings' && (canManageSettings || canManageUpdates) && (
                   <AdminSettingsTab
                     settings={settings}
+                    canManageSettings={canManageSettings}
+                    canManageUpdates={canManageUpdates}
                     onReload={reloadAll}
                     onError={setError}
                   />

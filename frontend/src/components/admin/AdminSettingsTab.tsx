@@ -3,6 +3,7 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  Download,
   ExternalLink,
   Loader2,
   Plug,
@@ -13,18 +14,31 @@ import {
 } from 'lucide-react';
 import { api } from '../../api/client';
 import { useI18n } from '../../i18n';
-import type { FilamentApiHealth, SystemSettings, SystemUpdateStatus } from '../../types/api';
+import type {
+  FilamentApiHealth,
+  SystemSettings,
+  SystemUpdateStatus,
+  UpdateJobStatus,
+} from '../../types/api';
 import { translateApiError } from '../../utils/errors';
 
 const DEBIAN_UPDATE_CMD = 'sudo /opt/ggprint/deploy/update-from-release.sh';
 
 interface AdminSettingsTabProps {
   settings: SystemSettings | null;
+  canManageSettings?: boolean;
+  canManageUpdates?: boolean;
   onReload: () => Promise<void>;
   onError: (msg: string) => void;
 }
 
-export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsTabProps) {
+export function AdminSettingsTab({
+  settings,
+  canManageSettings = true,
+  canManageUpdates = true,
+  onReload,
+  onError,
+}: AdminSettingsTabProps) {
   const { t } = useI18n();
   const [form, setForm] = useState<SystemSettings | null>(settings);
   const [apiKeyInput, setApiKeyInput] = useState('');
@@ -35,27 +49,45 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
   const [updateStatus, setUpdateStatus] = useState<SystemUpdateStatus | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [confirmingUpdate, setConfirmingUpdate] = useState(false);
+  const [triggeringUpdate, setTriggeringUpdate] = useState(false);
+  const [updateJob, setUpdateJob] = useState<UpdateJobStatus | null>(null);
   const [copiedCli, setCopiedCli] = useState(false);
 
   const fetchUpdateStatus = useCallback(
     async (force: boolean) => {
+      if (!canManageUpdates) return;
       setCheckingUpdates(true);
       setUpdateError(null);
       try {
         const res = await api.adminGetUpdateStatus(force);
         setUpdateStatus(res);
+        if (res.update_job) {
+          setUpdateJob(res.update_job);
+        }
       } catch (err) {
         setUpdateError(translateApiError(err, t));
       } finally {
         setCheckingUpdates(false);
       }
     },
-    [t]
+    [canManageUpdates, t]
   );
 
   useEffect(() => {
-    void fetchUpdateStatus(false);
-  }, [fetchUpdateStatus]);
+    if (canManageUpdates) {
+      void fetchUpdateStatus(false);
+    }
+  }, [canManageUpdates, fetchUpdateStatus]);
+
+  useEffect(() => {
+    if (!canManageUpdates) return;
+    if (updateJob?.state !== 'queued' && updateJob?.state !== 'updating') return;
+    const timer = window.setInterval(() => {
+      void fetchUpdateStatus(false);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [canManageUpdates, updateJob?.state, fetchUpdateStatus]);
 
   useEffect(() => {
     if (settings) {
@@ -63,7 +95,7 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
     }
   }, [settings]);
 
-  if (!form) {
+  if (canManageSettings && !form) {
     return (
       <div className="studio-surface flex items-center gap-2 p-6 text-sm text-[#5B616E] dark:text-[#9399A6]">
         <Loader2 className="h-4 w-4 animate-spin text-[#00A7D9]" />
@@ -74,6 +106,7 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!form) return;
     setSaving(true);
     setSavedToast(false);
     try {
@@ -106,6 +139,7 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
   };
 
   const handleTestFilamentApi = async () => {
+    if (!form) return;
     setTestingFilamentApi(true);
     setFilamentApiTest(null);
     try {
@@ -124,6 +158,21 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
     }
   };
 
+  const handleTriggerUpdate = async () => {
+    if (!updateStatus?.latest_version) return;
+    setTriggeringUpdate(true);
+    setUpdateError(null);
+    try {
+      const job = await api.adminTriggerUpdate(updateStatus.latest_version);
+      setUpdateJob(job);
+      setConfirmingUpdate(false);
+    } catch (err) {
+      setUpdateError(translateApiError(err, t));
+    } finally {
+      setTriggeringUpdate(false);
+    }
+  };
+
   const handleCopyCli = async () => {
     try {
       await navigator.clipboard.writeText(DEBIAN_UPDATE_CMD);
@@ -134,8 +183,15 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
     }
   };
 
+  const formattedLatest = updateStatus?.latest_version
+    ? `v${updateStatus.latest_version.replace(/^v/i, '')}`
+    : null;
+  const activeUpdateBusy =
+    triggeringUpdate || updateJob?.state === 'queued' || updateJob?.state === 'updating';
+
   return (
     <div className="space-y-6">
+    {canManageSettings && form && (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div className="studio-surface p-5 space-y-4">
         <h2 className="text-base font-semibold text-[#111318] dark:text-[#F4F5F7]">
@@ -401,8 +457,10 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
         </button>
       </div>
     </form>
+    )}
 
-    {/* Software Version & GitHub Releases */}
+    {/* Software Version & On-Demand Updates */}
+    {canManageUpdates && (
     <div className="studio-surface space-y-4 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -413,18 +471,113 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
             {t.admin.settings.updateSectionDesc}
           </p>
         </div>
-        <button
-          type="button"
-          disabled={checkingUpdates}
-          onClick={() => void fetchUpdateStatus(true)}
-          className="btn-secondary shrink-0 px-3 py-1.5 text-xs"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${checkingUpdates ? 'animate-spin' : ''}`} />
-          {checkingUpdates
-            ? t.admin.settings.checkingUpdatesBtn
-            : t.admin.settings.checkUpdatesBtn}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={checkingUpdates}
+            onClick={() => void fetchUpdateStatus(true)}
+            className="btn-secondary shrink-0 px-3 py-1.5 text-xs"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${checkingUpdates ? 'animate-spin' : ''}`} />
+            {checkingUpdates
+              ? t.admin.settings.checkingUpdatesBtn
+              : t.admin.settings.checkUpdatesBtn}
+          </button>
+          {updateStatus?.update_available &&
+            formattedLatest &&
+            updateStatus.updater_configured && (
+              <button
+                type="button"
+                disabled={activeUpdateBusy}
+                onClick={() => setConfirmingUpdate(true)}
+                className="btn-primary shrink-0 px-3 py-1.5 text-xs"
+              >
+                {activeUpdateBusy ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                {activeUpdateBusy
+                  ? t.admin.settings.updatingNowBtn
+                  : t.admin.settings.updateNowBtn.replace('{version}', formattedLatest)}
+              </button>
+            )}
+        </div>
       </div>
+
+      {/* Inline Update Confirmation */}
+      {confirmingUpdate && formattedLatest && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#00A7D9]/30 bg-[#00A7D9]/10 px-4 py-3 text-xs">
+          <span className="font-medium text-[#111318] dark:text-[#F4F5F7]">
+            {t.admin.settings.updateConfirmPrompt.replace('{version}', formattedLatest)}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={triggeringUpdate}
+              onClick={() => setConfirmingUpdate(false)}
+              className="btn-secondary px-3 py-1.5 text-xs"
+            >
+              {t.common.cancel}
+            </button>
+            <button
+              type="button"
+              disabled={triggeringUpdate}
+              onClick={() => void handleTriggerUpdate()}
+              className="btn-primary px-3 py-1.5 text-xs"
+            >
+              {triggeringUpdate ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Download className="h-3.5 w-3.5" />
+              )}
+              {t.common.confirm}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Live Update Job Status */}
+      {updateJob && updateJob.state !== 'idle' && (
+        <div
+          className={`flex items-center gap-2 rounded-xl px-3.5 py-2.5 text-xs font-medium ${
+            updateJob.state === 'succeeded'
+              ? 'bg-emerald-500/12 text-emerald-800 dark:text-emerald-300'
+              : updateJob.state === 'failed'
+                ? 'bg-rose-500/12 text-rose-800 dark:text-rose-300'
+                : 'bg-[#00A7D9]/12 text-[#007BA3] dark:text-[#38C6F4]'
+          }`}
+        >
+          {updateJob.state === 'succeeded' ? (
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          ) : updateJob.state === 'failed' ? (
+            <XCircle className="h-4 w-4 shrink-0" />
+          ) : (
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+          )}
+          <span>
+            {updateJob.state === 'queued'
+              ? t.admin.settings.updateQueuedMsg.replace(
+                  '{version}',
+                  updateJob.target_version || formattedLatest || ''
+                )
+              : updateJob.state === 'updating'
+                ? t.admin.settings.updateInProgressMsg.replace(
+                    '{version}',
+                    updateJob.target_version || formattedLatest || ''
+                  )
+                : updateJob.state === 'succeeded'
+                  ? t.admin.settings.updateSucceededMsg.replace(
+                      '{version}',
+                      updateJob.target_version || formattedLatest || ''
+                    )
+                  : t.admin.settings.updateFailedMsg.replace(
+                      '{message}',
+                      updateJob.message || ''
+                    )}
+          </span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="studio-subtle px-3.5 py-2.5">
@@ -444,9 +597,7 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2">
             <span className="font-mono text-sm font-semibold tabular-nums text-[#111318] dark:text-[#F4F5F7]">
-              {updateStatus?.latest_version
-                ? `v${updateStatus.latest_version.replace(/^v/i, '')}`
-                : '—'}
+              {formattedLatest || '—'}
             </span>
             {updateStatus?.update_available ? (
               <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
@@ -483,6 +634,11 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
       )}
 
       <div className="space-y-1.5 border-t border-black/[0.06] pt-3.5 dark:border-white/[0.07]">
+        {updateStatus?.update_available && !updateStatus.updater_configured && (
+          <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
+            {t.admin.settings.updaterNotConfiguredHint}
+          </p>
+        )}
         <div className="flex items-center gap-1.5 text-xs text-[#5B616E] dark:text-[#9399A6]">
           <Terminal className="h-3.5 w-3.5 shrink-0" />
           <span>{t.admin.settings.updateCliHint}</span>
@@ -507,6 +663,7 @@ export function AdminSettingsTab({ settings, onReload, onError }: AdminSettingsT
         </div>
       </div>
     </div>
+    )}
     </div>
   );
 }

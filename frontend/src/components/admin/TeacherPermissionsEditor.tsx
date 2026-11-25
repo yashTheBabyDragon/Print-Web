@@ -27,6 +27,7 @@ export const FALLBACK_PERMISSION_CATALOG: PermissionCatalog = {
     { key: PERMISSIONS.PROFILES_MANAGE, group: 'printers' },
     { key: PERMISSIONS.TEACHERS_MANAGE, group: 'admin' },
     { key: PERMISSIONS.SETTINGS_MANAGE, group: 'admin' },
+    { key: PERMISSIONS.UPDATES_MANAGE, group: 'admin' },
   ],
   presets: [
     { id: 'teacher_default', permissions: DEFAULT_TEACHER_PERMISSIONS },

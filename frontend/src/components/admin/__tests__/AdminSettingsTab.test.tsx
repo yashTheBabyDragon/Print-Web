@@ -192,4 +192,49 @@ describe('AdminSettingsTab', () => {
     expect(await screen.findByText('Update available')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /View release on GitHub/i })).not.toBeInTheDocument();
   });
+
+  it('triggers on-demand update after confirmation and renders updates-only mode when canManageSettings=false', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'adminGetUpdateStatus').mockResolvedValue({
+      current_version: '1.0.0',
+      latest_version: '1.3.0',
+      update_available: true,
+      release_url: 'https://github.com/yashTheBabyDragon/GGPrint-Web/releases/tag/v1.3.0',
+      checked_at: '2026-01-01T00:00:00Z',
+      repo: 'yashTheBabyDragon/GGPrint-Web',
+      error: null,
+      updater_configured: true,
+      update_job: null,
+    });
+    const triggerSpy = vi.spyOn(api, 'adminTriggerUpdate').mockResolvedValue({
+      state: 'queued',
+      target_version: '1.3.0',
+      requested_by: 'admin',
+    });
+
+    render(
+      <I18nProvider>
+        <AdminSettingsTab
+          settings={null}
+          canManageSettings={false}
+          canManageUpdates={true}
+          onReload={vi.fn().mockResolvedValue(undefined)}
+          onError={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    // Updates-only mode: no system settings form, Update button visible
+    expect(screen.queryByRole('button', { name: /Save settings/i })).not.toBeInTheDocument();
+    const updateBtn = await screen.findByRole('button', { name: /Update to v1\.3\.0/i });
+    await user.click(updateBtn);
+
+    // Confirm inline prompt
+    await user.click(screen.getByRole('button', { name: /^Confirm$/i }));
+
+    await waitFor(() => {
+      expect(triggerSpy).toHaveBeenCalledWith('1.3.0');
+    });
+    expect(await screen.findByText(/Update to 1\.3\.0 queued/i)).toBeInTheDocument();
+  });
 });

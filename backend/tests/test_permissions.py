@@ -118,10 +118,12 @@ def test_rbac_matrix_admin_only_endpoints_blocked_for_teacher_and_student(client
         # Teachers
         ("GET", "/api/admin/teachers", None, Permission.TEACHERS_MANAGE),
         ("POST", "/api/admin/teachers", {"identifier": "new.t@cgodin.qc.ca", "name": "New T", "password": "secret"}, Permission.TEACHERS_MANAGE),
-        # Settings
+        # Settings & Updates
         ("GET", "/api/admin/settings", None, Permission.SETTINGS_MANAGE),
         ("PATCH", "/api/admin/settings", {"default_max_active_grams": 250.0}, Permission.SETTINGS_MANAGE),
         ("POST", "/api/admin/filament-api/test", {"url": "http://localhost:8000"}, Permission.SETTINGS_MANAGE),
+        ("GET", "/api/admin/system/update-status", None, Permission.UPDATES_MANAGE),
+        ("POST", "/api/admin/system/update-trigger", {"target_version": "v1.1.0"}, Permission.UPDATES_MANAGE),
     ]
 
     for tok in (t_token, s_token):

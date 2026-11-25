@@ -553,6 +553,7 @@ export const fr = {
         'profiles:manage': 'Gérer les profils OrcaSlicer',
         'teachers:manage': 'Gérer les comptes enseignants et permissions',
         'settings:manage': 'Modifier les paramètres globaux',
+        'updates:manage': 'Gérer les mises à jour',
       },
       presets: {
         teacher_default: {
@@ -630,9 +631,9 @@ export const fr = {
       filamentApiTestOk: 'Connecté · {count} imprimante(s) configurée(s)',
       filamentApiTestFail: 'Connexion impossible',
       saveSettings: 'Enregistrer les paramètres',
-      updateSectionTitle: 'Version logicielle & Mises à jour GitHub',
+      updateSectionTitle: 'Version logicielle & Mises à jour',
       updateSectionDesc:
-        'Vérifie automatiquement les nouvelles versions publiées sur GitHub Releases et indique la commande de mise à jour Docker Compose.',
+        'Consultez la version installée, comparez-la à la dernière version GitHub et lancez une mise à jour manuellement sur demande.',
       currentVersionLabel: 'Version installée',
       latestVersionLabel: 'Dernière version GitHub',
       updateAvailableBadge: 'Mise à jour disponible',
@@ -640,8 +641,19 @@ export const fr = {
       checkUpdatesBtn: 'Vérifier les mises à jour',
       checkingUpdatesBtn: 'Vérification…',
       viewReleaseLink: 'Voir la version sur GitHub',
-      updateCliHint: 'Mise à jour manuelle sur votre hôte Docker (ou automatique via le timer quotidien) :',
+      updateCliHint: 'Ou lancez la mise à jour manuellement sur votre hôte Docker :',
       updateCheckError: 'Impossible de vérifier les mises à jour GitHub',
+      updateNowBtn: 'Mettre à jour vers {version}',
+      updatingNowBtn: 'Mise à jour en cours…',
+      updateConfirmPrompt:
+        'Lancer la mise à jour de GGPrint vers {version} ? Le serveur va redémarrer brièvement pendant l’opération.',
+      updateQueuedMsg: 'Mise à jour vers {version} en file d’attente…',
+      updateInProgressMsg: 'Mise à jour vers {version} en cours…',
+      updateSucceededMsg: 'Mise à jour vers {version} terminée avec succès.',
+      updateFailedMsg: 'Échec de la mise à jour : {message}',
+      updaterNotConfiguredHint:
+        'Le déclencheur de mise à jour depuis l’interface n’est pas configuré sur cet hôte. Utilisez la commande serveur ci-dessous :',
+      updatesTabLabel: 'Mises à jour',
     },
   },
 };

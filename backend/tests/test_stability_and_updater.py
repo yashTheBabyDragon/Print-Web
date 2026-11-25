@@ -80,7 +80,7 @@ def test_update_status_available_up_to_date_404_offline_and_rbac(
 
     r_teacher = client.get("/api/admin/system/update-status", headers=_auth(t_token))
     assert r_teacher.status_code == 403
-    assert r_teacher.json()["detail"]["required_permission"] == "settings:manage"
+    assert r_teacher.json()["detail"]["required_permission"] == "updates:manage"
 
     monkeypatch.setattr(settings, "app_version", "1.0.0")
     monkeypatch.setattr(settings, "github_repo", "yashTheBabyDragon/GGPrint-Web")
@@ -158,3 +158,89 @@ def test_update_status_available_up_to_date_404_offline_and_rbac(
     assert r_off.status_code == 200
     assert r_off.json()["update_available"] is False
     assert r_off.json()["error"] is not None
+
+
+def test_update_trigger_rbac_validation_and_file_queue(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    a_token = _login(client, "admin", "admin123")["access_token"]
+    t_login = _login(client, "m.tremblay@cgodin.qc.ca", "teacher123")
+    t_token = t_login["access_token"]
+    teacher_id = t_login["user"]["id"]
+
+    # 1. Default teacher -> 403 on update-trigger
+    r_t_forbid = client.post(
+        "/api/admin/system/update-trigger",
+        headers=_auth(t_token),
+        json={"target_version": "v1.2.0"},
+    )
+    assert r_t_forbid.status_code == 403
+    assert r_t_forbid.json()["detail"]["required_permission"] == "updates:manage"
+
+    # 2. Updater not configured -> 400 UPDATER_NOT_CONFIGURED
+    monkeypatch.setattr(settings, "updater_dir", None)
+    r_unconf = client.post(
+        "/api/admin/system/update-trigger",
+        headers=_auth(a_token),
+        json={"target_version": "v1.2.0"},
+    )
+    assert r_unconf.status_code == 400
+    assert r_unconf.json()["detail"]["code"] == "UPDATER_NOT_CONFIGURED"
+
+    # Configure updater_dir
+    upd_dir = tmp_path / "updater"
+    upd_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "updater_dir", str(upd_dir))
+
+    # 3. Invalid tag -> 400 INVALID_VERSION_TAG
+    r_bad_tag = client.post(
+        "/api/admin/system/update-trigger",
+        headers=_auth(a_token),
+        json={"target_version": "v1.2.0; rm -rf /"},
+    )
+    assert r_bad_tag.status_code == 400
+    assert r_bad_tag.json()["detail"]["code"] == "INVALID_VERSION_TAG"
+
+    # 4. Admin triggers update -> 202 and writes request.json + status.json
+    r_ok = client.post(
+        "/api/admin/system/update-trigger",
+        headers=_auth(a_token),
+        json={"target_version": "v1.2.0"},
+    )
+    assert r_ok.status_code == 202, r_ok.text
+    job = r_ok.json()
+    assert job["state"] == "queued"
+    assert job["target_version"] == "v1.2.0"
+    assert (upd_dir / "request.json").is_file()
+    assert (upd_dir / "status.json").is_file()
+
+    # 5. Concurrent trigger while queued -> 409 UPDATE_IN_PROGRESS
+    r_dup = client.post(
+        "/api/admin/system/update-trigger",
+        headers=_auth(a_token),
+        json={"target_version": "v1.3.0"},
+    )
+    assert r_dup.status_code == 409
+    assert r_dup.json()["detail"]["code"] == "UPDATE_IN_PROGRESS"
+
+    # 6. Grant ONLY updates:manage to teacher -> teacher can inspect update-status and trigger once idle/succeeded
+    (upd_dir / "status.json").write_text('{"state": "succeeded", "target_version": "v1.2.0"}', encoding="utf-8")
+    r_grant = client.patch(
+        f"/api/admin/teachers/{teacher_id}",
+        headers=_auth(a_token),
+        json={"permissions": ["updates:manage"]},
+    )
+    assert r_grant.status_code == 200
+
+    # Teacher cannot view system settings, CAN trigger update
+    assert client.get("/api/admin/settings", headers=_auth(t_token)).status_code == 403
+    r_t_ok = client.post(
+        "/api/admin/system/update-trigger",
+        headers=_auth(t_token),
+        json={"target_version": "v1.3.0"},
+    )
+    assert r_t_ok.status_code == 202, r_t_ok.text
+    assert r_t_ok.json()["state"] == "queued"
+    assert r_t_ok.json()["target_version"] == "v1.3.0"

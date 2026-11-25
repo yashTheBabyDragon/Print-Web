@@ -37,6 +37,7 @@ import type {
   TeacherPublic,
   TestSliceResult,
   TransformPayload,
+  UpdateJobStatus,
   UserSummary,
   WebhookTestResult,
   WhitelistEntry,
@@ -433,6 +434,11 @@ export const api = {
     request<SystemUpdateStatus>(
       `/api/admin/system/update-status?force=${force ? 'true' : 'false'}`
     ),
+  adminTriggerUpdate: (targetVersion?: string) =>
+    request<UpdateJobStatus>('/api/admin/system/update-trigger', {
+      method: 'POST',
+      body: JSON.stringify(targetVersion ? { target_version: targetVersion } : {}),
+    }),
 
   // Admin: FilamentAPI
   adminTestFilamentApi: (url?: string) =>

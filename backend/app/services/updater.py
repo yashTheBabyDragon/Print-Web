@@ -1,21 +1,28 @@
-"""GitHub Releases update checker with 10-minute in-memory cache and semver comparison."""
+"""GitHub Releases update checker (10-min cache) and safe on-demand systemd .path trigger."""
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import httpx
+from fastapi import HTTPException, status
 
 from app.config import settings
-from app.schemas import SystemUpdateStatusOut
+from app.schemas import SystemUpdateStatusOut, UpdateJobStatusOut
 
 logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SECONDS = 600.0
+_VERSION_TAG_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_VALID_JOB_STATES = frozenset({"idle", "queued", "updating", "succeeded", "failed"})
+
 _cached_key: Optional[tuple[str, str]] = None
 _cached_at_mono: float = 0.0
 _cached_result: Optional[SystemUpdateStatusOut] = None
@@ -50,6 +57,114 @@ def is_newer_version(latest: str, current: str) -> bool:
     return a_pad > b_pad
 
 
+def _get_updater_dir() -> Optional[Path]:
+    raw = (settings.updater_dir or "").strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    try:
+        if p.is_dir():
+            return p
+    except OSError:
+        return None
+    return None
+
+
+def is_updater_configured() -> bool:
+    """Return True when UPDATER_DIR is configured and exists on disk."""
+    return _get_updater_dir() is not None
+
+
+def read_update_job_status() -> Optional[UpdateJobStatusOut]:
+    """Read <updater_dir>/status.json safely if configured and present."""
+    upd_dir = _get_updater_dir()
+    if upd_dir is None:
+        return None
+    status_file = upd_dir / "status.json"
+    if not status_file.is_file():
+        return None
+    try:
+        data = json.loads(status_file.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        raw_state = str(data.get("state") or "idle").strip().lower()
+        state = raw_state if raw_state in _VALID_JOB_STATES else "idle"
+        return UpdateJobStatusOut(
+            state=state,  # type: ignore[arg-type]
+            target_version=str(data["target_version"]) if data.get("target_version") else None,
+            requested_by=str(data["requested_by"]) if data.get("requested_by") else None,
+            updated_at=str(data["updated_at"]) if data.get("updated_at") else None,
+            message=str(data["message"]) if data.get("message") else None,
+        )
+    except Exception as exc:
+        logger.warning("Failed to parse updater status.json: %s", exc)
+        return None
+
+
+def _atomic_write_json(dest: Path, payload: dict) -> None:
+    tmp_path = dest.with_suffix(dest.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp_path, dest)
+
+
+def trigger_update(target_version: str, requested_by: str) -> UpdateJobStatusOut:
+    """Validate and queue an on-demand host update by writing status.json and request.json."""
+    cleaned = (target_version or "").strip()
+    if not _VERSION_TAG_RE.match(cleaned):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_VERSION_TAG",
+                "message": "Target version tag must match ^[A-Za-z0-9._-]{1,64}$",
+            },
+        )
+
+    upd_dir = _get_updater_dir()
+    if upd_dir is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "UPDATER_NOT_CONFIGURED",
+                "message": "Host updater directory (UPDATER_DIR) is not configured on this server.",
+            },
+        )
+
+    existing = read_update_job_status()
+    if existing is not None and existing.state in ("queued", "updating"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "UPDATE_IN_PROGRESS",
+                "message": f"An update to {existing.target_version or 'latest'} is already {existing.state}.",
+            },
+        )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    status_payload = {
+        "state": "queued",
+        "target_version": cleaned,
+        "requested_by": requested_by,
+        "updated_at": now_iso,
+        "message": f"Update to {cleaned} queued.",
+    }
+    request_payload = {
+        "target_version": cleaned,
+        "requested_by": requested_by,
+        "requested_at": now_iso,
+    }
+
+    _atomic_write_json(upd_dir / "status.json", status_payload)
+    _atomic_write_json(upd_dir / "request.json", request_payload)
+
+    return UpdateJobStatusOut(
+        state="queued",
+        target_version=cleaned,
+        requested_by=requested_by,
+        updated_at=now_iso,
+        message=status_payload["message"],
+    )
+
+
 async def check_latest_github_release(force: bool = False) -> SystemUpdateStatusOut:
     """Query GitHub Releases API for the latest published release with 10-min caching."""
     global _cached_key, _cached_at_mono, _cached_result
@@ -65,7 +180,12 @@ async def check_latest_github_release(force: bool = False) -> SystemUpdateStatus
         and _cached_key == cache_key
         and (now_mono - _cached_at_mono) < _CACHE_TTL_SECONDS
     ):
-        return _cached_result
+        return _cached_result.model_copy(
+            update={
+                "updater_configured": is_updater_configured(),
+                "update_job": read_update_job_status(),
+            }
+        )
 
     checked_at = datetime.now(timezone.utc).isoformat()
     url = f"https://api.github.com/repos/{repo}/releases/latest"
@@ -152,4 +272,9 @@ async def check_latest_github_release(force: bool = False) -> SystemUpdateStatus
     _cached_key = cache_key
     _cached_at_mono = now_mono
     _cached_result = result
-    return result
+    return result.model_copy(
+        update={
+            "updater_configured": is_updater_configured(),
+            "update_job": read_update_job_status(),
+        }
+    )

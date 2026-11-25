@@ -461,6 +461,14 @@ export interface SystemSettings {
   filament_api_url: string;
 }
 
+export interface UpdateJobStatus {
+  state: 'idle' | 'queued' | 'updating' | 'succeeded' | 'failed';
+  target_version?: string | null;
+  requested_by?: string | null;
+  updated_at?: string | null;
+  message?: string | null;
+}
+
 export interface SystemUpdateStatus {
   current_version: string;
   latest_version?: string | null;
@@ -471,6 +479,8 @@ export interface SystemUpdateStatus {
   checked_at: string;
   repo: string;
   error?: string | null;
+  updater_configured?: boolean;
+  update_job?: UpdateJobStatus | null;
 }
 
 export interface FilamentApiPrinter {

@@ -159,6 +159,7 @@ class Settings(BaseSettings):
     app_version: str = Field(default_factory=detect_app_version)
     github_repo: str = "yashTheBabyDragon/GGPrint-Web"
     github_token: Optional[str] = None
+    updater_dir: Optional[str] = None
 
     @field_validator("app_version", mode="before")
     @classmethod

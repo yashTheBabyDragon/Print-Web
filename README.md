@@ -13,7 +13,7 @@
 - **RBAC Presets & Manual Permissions**: Role-based access control (Student, Teacher, Admin) with preset permission bundles and fine-grained per-user permission overrides.
 - **OrcaSlicer & PrusaSlicer `.ini` Selective Import**: Upload OrcaSlicer `.json` profiles or selectively import printer/filament/process profiles from PrusaSlicer `.ini` bundles, then bind them to printers and MMU slots.
 - **FDM Monster & Filament API**: Live printer & MMU slot synchronization, queue dispatch, and filament inventory management via FDM Monster.
-- **Docker-First Deployment & GitHub Release Auto-Updates**: Production runs entirely in Docker Compose (PostgreSQL 16 + FastAPI + Nginx) with a one-line Debian/Ubuntu Docker bootstrapper, Admin UI release status card, and daily `systemd` auto-update timer with PostgreSQL backups and health-checked rollback.
+- **Docker-First Deployment & On-Demand GitHub Release Updates**: Production runs entirely in Docker Compose (PostgreSQL 16 + FastAPI + Nginx) pulling pre-built GHCR images. Updates are strictly **manual / on-demand** — Admins (or users granted `updates:manage`) view the installed version vs. latest GitHub Release and choose when to update via the Admin UI (`ggprint-update.path`) or CLI, with PostgreSQL backups and health-checked rollback.
 
 ---
 
@@ -27,10 +27,10 @@
 ├── frontend/                    # React 18 + Vite + TypeScript + Tailwind CSS + Three.js
 │   └── Dockerfile               # Multi-stage Node 22 build -> Nginx SPA + /api proxy + HEALTHCHECK
 ├── deploy/                      # Debian 11/12/13 & Ubuntu Docker Compose deployment kit
-│   ├── install-debian.sh        # Automated installer (Docker Engine + Compose, .env, stack startup, timer)
-│   ├── update-from-release.sh   # GitHub Release Docker updater with PostgreSQL backup & auto-rollback
-│   ├── ggprint-update.service   # Oneshot systemd unit for Docker Compose release updates
-│   ├── ggprint-update.timer     # Daily 03:30 (+15m jitter) auto-update timer
+│   ├── install-debian.sh        # Automated installer (Docker Engine + Compose, .env, GHCR pull, .path)
+│   ├── update-from-release.sh   # On-demand GHCR release updater with PostgreSQL backup & rollback
+│   ├── ggprint-update.service   # Oneshot systemd unit for on-demand Docker Compose release updates
+│   ├── ggprint-update.path      # Path unit watching /opt/ggprint/updater/request.json (no schedule)
 │   └── .env.production.example  # Documented Docker Compose production environment template
 ├── .github/workflows/
 │   ├── ci.yml                   # Backend pytest, frontend test/build, Docker image builds
@@ -90,16 +90,16 @@ curl -fsSL https://raw.githubusercontent.com/yashTheBabyDragon/GGPrint-Web/main/
 You can customize the install with environment variables:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yashTheBabyDragon/GGPrint-Web/main/deploy/install-debian.sh \
-  | sudo GGPRINT_DOMAIN=ggprint.example.edu GGPRINT_HTTP_PORT=80 GGPRINT_AUTO_UPDATE=true bash
+  | sudo GGPRINT_DOMAIN=ggprint.example.edu GGPRINT_HTTP_PORT=80 bash
 ```
 
 #### What `install-debian.sh` does step-by-step
 1. Installs minimal host prerequisites (`git`, `curl`, `ca-certificates`, `gnupg`, `jq`, `openssl`).
 2. Installs **Docker Engine** and the **Docker Compose plugin** from Docker's official repository (skipped if already installed) and enables `docker.service`.
 3. Clones `yashTheBabyDragon/GGPrint-Web` into `/opt/ggprint` and checks out the latest GitHub Release tag (or `main` if no release exists yet), recording `.ggprint-version`.
-4. Generates `/opt/ggprint/.env` (`chmod 600`) with random `JWT_SECRET` and `POSTGRES_PASSWORD` (**never overwrites** an existing `.env`).
-5. Builds and starts the Docker Compose stack (`docker compose up -d --build`).
-6. Installs and enables `ggprint-update.timer` to run daily Docker updates.
+4. Generates `/opt/ggprint/.env` (`chmod 600`) with random `JWT_SECRET`, `POSTGRES_PASSWORD`, `APP_VERSION`, `GGPRINT_IMAGE_TAG`, and `GGPRINT_UPDATER_DIR=/opt/ggprint/updater` (**never overwrites** an existing `.env`).
+5. Pulls the pre-built container images from **GitHub Container Registry (GHCR)** (`docker compose pull`) and starts the stack without building locally (`docker compose up -d --no-build --remove-orphans`). *(Pass `GGPRINT_LOCAL_BUILD=true` only if you explicitly want to build images on the host.)*
+6. Installs and enables `ggprint-update.path` + `ggprint-update.service` for **on-demand** updates triggered from the Admin UI (no scheduled auto-update timer is installed).
 7. Verifies `http://127.0.0.1:8000/api/health` and prints post-install instructions.
 
 ### Option B: Manual Docker Compose Setup (Any Docker Host)
@@ -109,7 +109,8 @@ cd GGPrint-Web
 cp deploy/.env.production.example .env
 # Edit .env: set strong POSTGRES_PASSWORD and JWT_SECRET, plus CORS_ORIGINS
 chmod 600 .env
-docker compose up -d --build
+docker compose pull
+docker compose up -d --no-build
 ```
 
 Services started (all with `restart: unless-stopped`, `no-new-privileges:true`, and `HEALTHCHECK`):
@@ -132,38 +133,43 @@ If exposing GGPrint over HTTPS, place a reverse proxy (Caddy, Nginx Proxy Manage
 
 ---
 
-## 3. Automatic Updates from GitHub Releases
+## 3. On-Demand Updates from GitHub Releases (Manual Only)
 
-GGPrint checks for new releases in two ways:
-1. **Admin UI visibility**: **Admin → Settings → Software Version & GitHub Releases** shows the running version, latest GitHub Release tag, release notes link, and a manual **Check for updates** button.
-2. **Automated Docker updater (`ggprint-update.timer`)**: Runs `/opt/ggprint/deploy/update-from-release.sh` daily at `03:30` (with up to 15 minutes random jitter and `Persistent=true`).
+GGPrint **never performs unattended scheduled auto-updates**. Updates are strictly **manual and permission-gated**:
+1. **Admin UI (recommended)**: Admins — or staff granted the **`updates:manage`** permission — open **Admin → Settings** (or the **Updates** tab) to see the currently installed version, the latest GitHub Release, release notes, and an **Update to vX.Y.Z** button. Clicking **Update** writes a validated trigger file to `/updater/request.json` (zero Docker socket exposure inside the container), which wakes the host `ggprint-update.path` systemd unit to run the upgrade and report live status (`queued` → `updating` → `succeeded` / `failed`).
+2. **CLI**: Server operators can also trigger or dry-run updates directly over SSH.
 
-### Manual Update Commands
+### Manual CLI Update Commands
 ```bash
 # Dry-run: check current vs latest GitHub Release without changing anything
 sudo /opt/ggprint/deploy/update-from-release.sh --check
 
-# Apply latest release (backs up PostgreSQL, rebuilds & restarts Docker stack)
+# Apply latest release (backs up PostgreSQL, pulls GHCR images & restarts stack)
 sudo /opt/ggprint/deploy/update-from-release.sh
 
-# Force rebuild/restart even if already on the latest tag
+# Apply a specific release tag
+sudo /opt/ggprint/deploy/update-from-release.sh v1.2.0
+
+# Force re-pull & restart even if already on the latest tag
 sudo /opt/ggprint/deploy/update-from-release.sh --force
 ```
 
-### Backups & Automatic Rollback
+### Backups & Automatic Rollback (GHCR Pre-Built Images)
 Before applying any update, `update-from-release.sh`:
-1. Records the previous git commit and `.ggprint-version`.
+1. Records the previous git commit, `.ggprint-version`, and `GGPRINT_IMAGE_TAG`.
 2. Creates a compressed PostgreSQL dump (`pg_dump`) in `/opt/ggprint/backups/ggprint-<old-version>-<timestamp>.sql.gz` (retaining the last 10 backups).
-3. Checks out the new release tag, updates `.ggprint-version` and `APP_VERSION` in `.env`, runs `docker compose up -d --build --remove-orphans`, and polls `http://127.0.0.1:8000/api/health` for up to 60 seconds.
-4. **If any build step or health check fails**, it automatically checks out the previous ref, restores `.ggprint-version` / `APP_VERSION`, rebuilds and restarts the previous Docker stack, logs the rollback, and exits non-zero.
+3. Checks out the requested release tag, updates `.ggprint-version`, `APP_VERSION`, and `GGPRINT_IMAGE_TAG` in `.env`, pulls the pre-built **GitHub Container Registry** images (`docker compose pull backend frontend` from `ghcr.io/yashthebabydragon/ggprint-web-backend` and `ghcr.io/yashthebabydragon/ggprint-web-frontend`), starts with `docker compose up -d --no-build --remove-orphans`, and polls `http://127.0.0.1:8000/api/health` for up to 60 seconds.
+4. **If the GHCR pull or health check fails**, it automatically restores the previous git ref, `.ggprint-version`, `APP_VERSION`, and `GGPRINT_IMAGE_TAG`, restarts the previous containers (`--no-build`), writes the failure status to `updater/status.json`, and exits non-zero.
 
-### Publishing a New Release
-Pushing a semantic version tag (`v*`) triggers `.github/workflows/release.yml`, which runs the full test suite and publishes a GitHub Release with auto-generated release notes:
+### End-to-End Release Pipeline (`release.yml` → `release-docker.yml` → On-Demand Update)
+Pushing a semantic version tag (`v*`) triggers the automated release publishing pipeline:
 ```bash
 git tag v1.1.0
 git push origin v1.1.0
 ```
-Every Docker host with `ggprint-update.timer` enabled will pick up `v1.1.0` automatically on its next scheduled check (or immediately when triggered manually).
+1. **`.github/workflows/release.yml`** runs the full backend/frontend test suite and publishes the GitHub Release `v1.1.0` with auto-generated release notes.
+2. **`.github/workflows/release-docker.yml`** triggers on `release: [published]`, builds the `backend` and `frontend` Docker images, and pushes them to **GitHub Packages (GHCR)** tagged `v1.1.0`, `1.1.0`, `1.1`, `1`, and `latest`.
+3. Admins (or users with `updates:manage`) see `v1.1.0` available in the UI and choose when to click **Update** (or run `update-from-release.sh` manually).
 
 ---
 
@@ -184,9 +190,14 @@ See [`deploy/.env.production.example`](deploy/.env.production.example) for a rea
 | `CORS_ORIGINS` | `["http://localhost", ...]` | JSON array of allowed browser origins |
 | `FRONTEND_PORT` | `80` | Host port mapped to the Nginx frontend container |
 | `BACKEND_PORT` | `8000` | Loopback host port (`127.0.0.1`) mapped to the FastAPI backend container |
+| `GGPRINT_IMAGE_TAG` | `latest` | GHCR container image tag pulled by Docker Compose (set to `vX.Y.Z` on releases) |
+| `GGPRINT_UPDATER_DIR` | `./data/updater` (`/opt/ggprint/updater`) | Host directory bind-mounted to `/updater` for on-demand UI update triggers |
+| `GGPRINT_BACKEND_IMAGE` | `ghcr.io/yashthebabydragon/ggprint-web-backend` | Backend container image repository |
+| `GGPRINT_FRONTEND_IMAGE` | `ghcr.io/yashthebabydragon/ggprint-web-frontend` | Frontend container image repository |
 | `APP_VERSION` | *(auto-detected)* | Installed version tag (kept in sync by installer/updater) |
 | `GITHUB_REPO` | `yashTheBabyDragon/GGPrint-Web` | GitHub `owner/repo` queried for release updates |
-| `GITHUB_TOKEN` | *(empty)* | Optional GitHub token to raise API rate limits or access private repos |
+| `GITHUB_TOKEN` | *(empty)* | Optional GitHub token for private GHCR packages or higher API rate limits |
+| `GITHUB_ACTOR` | `x-access-token` | Optional GitHub username used with `GITHUB_TOKEN` for `docker login ghcr.io` |
 
 ---
 
@@ -237,9 +248,9 @@ bash -n deploy/update-from-release.sh
   docker compose ps
   docker compose logs -f --tail=100
   ```
-- **Inspect auto-update timer & logs**:
+- **Inspect on-demand updater path unit & logs**:
   ```bash
-  systemctl list-timers ggprint-update.timer
+  systemctl status ggprint-update.path
   sudo journalctl -u ggprint-update.service -n 100 --no-pager
   ```
 - **Restore a PostgreSQL backup manually**:

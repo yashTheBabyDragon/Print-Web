@@ -766,6 +766,18 @@ class SystemSettingsPatch(BaseModel):
     filament_api_url: Optional[str] = Field(default=None, max_length=255)
 
 
+class UpdateJobStatusOut(BaseModel):
+    state: Literal["idle", "queued", "updating", "succeeded", "failed"] = "idle"
+    target_version: Optional[str] = None
+    requested_by: Optional[str] = None
+    updated_at: Optional[str] = None
+    message: Optional[str] = None
+
+
+class UpdateTriggerRequest(BaseModel):
+    target_version: Optional[str] = Field(default=None, max_length=64)
+
+
 class SystemUpdateStatusOut(BaseModel):
     current_version: str
     latest_version: Optional[str] = None
@@ -776,6 +788,8 @@ class SystemUpdateStatusOut(BaseModel):
     checked_at: str
     repo: str
     error: Optional[str] = None
+    updater_configured: bool = False
+    update_job: Optional[UpdateJobStatusOut] = None
 
 
 # --- FilamentAPI Integration ---

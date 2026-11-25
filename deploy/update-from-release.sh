@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# GGPrint — Automatic GitHub Release Updater (Docker Compose)
-# Always updates GGPrint inside Docker containers with PostgreSQL backup & rollback.
+# GGPrint — On-Demand GitHub Release Updater (GHCR Pre-Built Docker Images)
+# Updates GGPrint ONLY when explicitly triggered by an Admin/permitted user
+# (via Admin UI -> /opt/ggprint/updater/request.json -> ggprint-update.path)
+# or manually via CLI. Never runs unattended on a schedule and never builds
+# containers locally on the host.
 #
 # Usage:
-#   sudo /opt/ggprint/deploy/update-from-release.sh [--check] [--force]
+#   sudo /opt/ggprint/deploy/update-from-release.sh [--check] [--force] [tag]
+#   sudo /opt/ggprint/deploy/update-from-release.sh --from-trigger
 #
 # Security:
 #   - Strictly validates release tags against ^[A-Za-z0-9._-]+$
@@ -18,48 +22,70 @@ GGPRINT_DIR="${GGPRINT_DIR:-${DEFAULT_DIR}}"
 GGPRINT_PORT="${GGPRINT_PORT:-8000}"
 GGPRINT_REPO="${GGPRINT_REPO:-}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+GITHUB_ACTOR="${GITHUB_ACTOR:-}"
 GGPRINT_VERIFY_SIGNATURES="${GGPRINT_VERIFY_SIGNATURES:-${GGPRINT_VERIFY_GPG:-}}"
 ENV_FILE="${GGPRINT_ENV_FILE:-${GGPRINT_DIR}/.env}"
+UPDATER_DIR="${GGPRINT_UPDATER_DIR:-${GGPRINT_DIR}/updater}"
 
 CHECK_ONLY=0
 FORCE_UPDATE=0
+FROM_TRIGGER=0
+EXPLICIT_TAG=""
+REQUESTED_BY="cli"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
+Usage: $(basename "$0") [OPTIONS] [TAG]
 
-Checks GitHub Releases for a newer version of GGPrint, backs up the Docker
-PostgreSQL database to compressed .sql.gz, rebuilds and restarts the Docker
-Compose stack, verifies /api/health, and automatically rolls back on failure.
+On-demand updater for GGPrint. Backs up the Docker PostgreSQL database to
+compressed .sql.gz, pulls the pre-built GHCR images for the requested (or
+latest) GitHub Release tag, restarts the Docker Compose stack (--no-build),
+verifies /api/health, and automatically rolls back on pull or health failure.
 
 Options:
-  --check     Dry-run: check current vs latest release and exit 0
-  --force     Force rebuild/restart even if already on the latest release
-  --docker    (Default) Docker Compose mode
-  -h, --help  Show this help message
+  --check         Dry-run: check current vs latest release and exit 0
+  --force         Force pull/restart even if already on the target release
+  --from-trigger  Read target_version from ${UPDATER_DIR}/request.json (used by systemd .path)
+  --docker        (Default) Docker Compose GHCR pull mode
+  -h, --help      Show this help message
+
+Arguments:
+  TAG             Optional explicit release tag (e.g. v1.2.0); defaults to latest GitHub Release
 
 Environment overrides:
   GGPRINT_DIR                Installation directory (default: ${DEFAULT_DIR})
+  GGPRINT_UPDATER_DIR        Trigger/status directory (default: ${GGPRINT_DIR}/updater)
   GGPRINT_REPO               GitHub owner/repo (default: yashTheBabyDragon/GGPrint-Web)
   GGPRINT_PORT               Backend healthcheck port (default: 8000)
   GGPRINT_VERIFY_SIGNATURES  Set to "true" to require 'git verify-tag' on release tags
-  GITHUB_TOKEN               Optional GitHub token for higher API rate limits
+  GITHUB_TOKEN               Optional GitHub token for private GHCR packages / API rate limits
+  GITHUB_ACTOR               Optional GitHub username for GHCR login (default: x-access-token)
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --check)  CHECK_ONLY=1 ;;
-    --force)  FORCE_UPDATE=1 ;;
-    --docker) ;;
+    --check)        CHECK_ONLY=1 ;;
+    --force)        FORCE_UPDATE=1 ;;
+    --from-trigger) FROM_TRIGGER=1 ;;
+    --docker)       ;;
     -h|--help)
       usage
       exit 0
       ;;
-    *)
+    -*)
       echo "Unknown option: $1" >&2
       usage >&2
       exit 2
+      ;;
+    *)
+      if [[ -z "${EXPLICIT_TAG}" ]]; then
+        EXPLICIT_TAG="$1"
+      else
+        echo "Unexpected extra argument: $1" >&2
+        usage >&2
+        exit 2
+      fi
       ;;
   esac
   shift
@@ -93,6 +119,9 @@ if [[ -r "${ENV_FILE}" ]]; then
   if [[ -z "${GITHUB_TOKEN}" ]]; then
     GITHUB_TOKEN="$(read_env_var "${ENV_FILE}" "GITHUB_TOKEN")"
   fi
+  if [[ -z "${GITHUB_ACTOR}" ]]; then
+    GITHUB_ACTOR="$(read_env_var "${ENV_FILE}" "GITHUB_ACTOR")"
+  fi
   if [[ -z "${GGPRINT_VERIFY_SIGNATURES}" ]]; then
     GGPRINT_VERIFY_SIGNATURES="$(read_env_var "${ENV_FILE}" "GGPRINT_VERIFY_SIGNATURES")"
     if [[ -z "${GGPRINT_VERIFY_SIGNATURES}" ]]; then
@@ -103,16 +132,51 @@ if [[ -r "${ENV_FILE}" ]]; then
   if [[ -n "${env_port}" ]]; then
     GGPRINT_PORT="${env_port}"
   fi
+  env_updater_dir="$(read_env_var "${ENV_FILE}" "GGPRINT_UPDATER_DIR")"
+  if [[ -n "${env_updater_dir}" && -z "${GGPRINT_UPDATER_DIR:-}" ]]; then
+    UPDATER_DIR="${env_updater_dir}"
+  fi
 fi
 
 GGPRINT_REPO="${GGPRINT_REPO:-yashTheBabyDragon/GGPrint-Web}"
 GGPRINT_VERIFY_SIGNATURES="${GGPRINT_VERIFY_SIGNATURES:-false}"
 HEALTH_URL="http://127.0.0.1:${GGPRINT_PORT}/api/health"
 VERSION_FILE="${GGPRINT_DIR}/.ggprint-version"
+REQUEST_FILE="${UPDATER_DIR}/request.json"
+STATUS_FILE="${UPDATER_DIR}/status.json"
 
 log()  { printf '[ggprint-update] %s\n' "$*"; }
 warn() { printf '[ggprint-update] WARNING: %s\n' "$*" >&2; }
 err()  { printf '[ggprint-update] ERROR: %s\n' "$*" >&2; }
+
+write_job_status() {
+  local state="$1"
+  local target="${2:-}"
+  local message="${3:-}"
+  if [[ ! -d "${UPDATER_DIR}" ]]; then
+    return 0
+  fi
+  local now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local tmp_file="${STATUS_FILE}.tmp.$$"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n \
+      --arg state "${state}" \
+      --arg target_version "${target}" \
+      --arg requested_by "${REQUESTED_BY}" \
+      --arg updated_at "${now}" \
+      --arg message "${message}" \
+      '{state: $state, target_version: (if $target_version == "" then null else $target_version end), requested_by: $requested_by, updated_at: $updated_at, message: $message}' \
+      > "${tmp_file}"
+  else
+    local safe_msg
+    safe_msg="$(printf '%s' "${message}" | tr '"' "'" | tr '\n' ' ')"
+    printf '{"state":"%s","target_version":"%s","requested_by":"%s","updated_at":"%s","message":"%s"}\n' \
+      "${state}" "${target}" "${REQUESTED_BY}" "${now}" "${safe_msg}" > "${tmp_file}"
+  fi
+  chmod 0644 "${tmp_file}" 2>/dev/null || true
+  mv -f "${tmp_file}" "${STATUS_FILE}"
+}
 
 if [[ ! -d "${GGPRINT_DIR}/.git" ]]; then
   err "Not a git repository: ${GGPRINT_DIR}"
@@ -125,7 +189,45 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Determine current local version & ref
+# 0. Handle --from-trigger mode (systemd .path activation)
+# ---------------------------------------------------------------------------
+if [[ "${FROM_TRIGGER}" -eq 1 ]]; then
+  if [[ ! -f "${REQUEST_FILE}" ]]; then
+    log "No trigger file at ${REQUEST_FILE}; nothing to do."
+    exit 0
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    EXPLICIT_TAG="$(jq -r '.target_version // empty' "${REQUEST_FILE}" 2>/dev/null || true)"
+    req_by="$(jq -r '.requested_by // empty' "${REQUEST_FILE}" 2>/dev/null || true)"
+    if [[ -n "${req_by}" ]]; then
+      REQUESTED_BY="${req_by}"
+    fi
+  else
+    EXPLICIT_TAG="$(sed -nE 's/.*"target_version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "${REQUEST_FILE}" | head -n 1 || true)"
+  fi
+
+  # Remove trigger file immediately so systemd .path will not re-fire in a loop
+  rm -f "${REQUEST_FILE}"
+
+  if [[ -z "${EXPLICIT_TAG}" ]]; then
+    err "Trigger file ${REQUEST_FILE} did not contain a valid target_version."
+    write_job_status "failed" "" "Update request was missing target_version."
+    exit 1
+  fi
+
+  if [[ ! "${EXPLICIT_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    err "Refusing invalid target_version from trigger file: '${EXPLICIT_TAG}'"
+    write_job_status "failed" "" "Refused invalid release tag name."
+    exit 1
+  fi
+
+  FORCE_UPDATE=1
+  write_job_status "updating" "${EXPLICIT_TAG}" "Starting update to ${EXPLICIT_TAG}..."
+fi
+
+# ---------------------------------------------------------------------------
+# 1. Determine current local version, image tag & git ref
 # ---------------------------------------------------------------------------
 get_current_version() {
   if [[ -f "${VERSION_FILE}" ]]; then
@@ -138,9 +240,11 @@ get_current_version() {
 
 CURRENT_VERSION="$(get_current_version)"
 PREV_REF="$(git -C "${GGPRINT_DIR}" rev-parse HEAD)"
+PREV_IMAGE_TAG="$(read_env_var "${ENV_FILE}" "GGPRINT_IMAGE_TAG")"
+PREV_IMAGE_TAG="${PREV_IMAGE_TAG:-latest}"
 
 # ---------------------------------------------------------------------------
-# 2. Query latest GitHub Release (with fallback to latest remote git tag)
+# 2. Determine target release tag (explicit or latest GitHub Release)
 # ---------------------------------------------------------------------------
 get_latest_release_tag() {
   local api_url="https://api.github.com/repos/${GGPRINT_REPO}/releases/latest"
@@ -180,37 +284,52 @@ get_latest_release_tag() {
   echo ""
 }
 
-LATEST_TAG="$(get_latest_release_tag)"
+if [[ -n "${EXPLICIT_TAG}" ]]; then
+  TARGET_TAG="${EXPLICIT_TAG}"
+else
+  TARGET_TAG="$(get_latest_release_tag)"
+fi
 
-if [[ -z "${LATEST_TAG}" ]]; then
+if [[ -z "${TARGET_TAG}" ]]; then
   log "No GitHub Release or version tags found for ${GGPRINT_REPO}. Nothing to update."
   exit 0
 fi
 
 # Strictly validate tag format to prevent ref/argument injection
-if [[ ! "${LATEST_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  err "Refusing invalid release tag name: '${LATEST_TAG}'"
+if [[ ! "${TARGET_TAG}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  err "Refusing invalid release tag name: '${TARGET_TAG}'"
+  write_job_status "failed" "" "Refused invalid release tag name."
   exit 1
 fi
 
-log "Current version: ${CURRENT_VERSION} | Latest release: ${LATEST_TAG}"
+log "Current version: ${CURRENT_VERSION} (image tag: ${PREV_IMAGE_TAG}) | Target release: ${TARGET_TAG}"
 
 if [[ "${CHECK_ONLY}" -eq 1 ]]; then
-  if [[ "${CURRENT_VERSION}" == "${LATEST_TAG}" ]]; then
+  if [[ "${CURRENT_VERSION}" == "${TARGET_TAG}" ]]; then
     log "Status: up to date."
   else
-    log "Status: update available (${CURRENT_VERSION} -> ${LATEST_TAG})."
+    log "Status: update available (${CURRENT_VERSION} -> ${TARGET_TAG})."
   fi
   exit 0
 fi
 
-if [[ "${CURRENT_VERSION}" == "${LATEST_TAG}" && "${FORCE_UPDATE}" -eq 0 ]]; then
-  log "Already up to date (${CURRENT_VERSION}). Use --force to reinstall."
+if [[ "${CURRENT_VERSION}" == "${TARGET_TAG}" && "${FORCE_UPDATE}" -eq 0 ]]; then
+  log "Already up to date (${CURRENT_VERSION}). Use --force to re-pull and restart."
   exit 0
 fi
 
+write_job_status "updating" "${TARGET_TAG}" "Backing up database and pulling GHCR images for ${TARGET_TAG}..."
+
 # ---------------------------------------------------------------------------
-# 3. Backup Docker PostgreSQL database (retaining last 10 .sql.gz backups)
+# 3. Optional GHCR login (for private GitHub Packages)
+# ---------------------------------------------------------------------------
+if [[ -n "${GITHUB_TOKEN}" ]]; then
+  log "Logging in to ghcr.io..."
+  printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR:-x-access-token}" --password-stdin >/dev/null
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Backup Docker PostgreSQL database (retaining last 10 .sql.gz backups)
 # ---------------------------------------------------------------------------
 backup_postgres() {
   local backup_dir="${GGPRINT_DIR}/backups"
@@ -246,17 +365,19 @@ backup_postgres() {
 backup_postgres
 
 # ---------------------------------------------------------------------------
-# 4. Docker Compose rebuild, restart & health check helpers
+# 5. Version state, GHCR pull, restart & health check helpers
 # ---------------------------------------------------------------------------
-write_version_file() {
+write_release_state() {
   local ver="$1"
+  local img_tag="$2"
   printf '%s\n' "${ver}" > "${VERSION_FILE}"
   set_env_var "${ENV_FILE}" "APP_VERSION" "${ver}"
+  set_env_var "${ENV_FILE}" "GGPRINT_IMAGE_TAG" "${img_tag}"
 }
 
-build_and_restart() {
-  log "Rebuilding and restarting GGPrint Docker Compose stack..."
-  (cd "${GGPRINT_DIR}" && docker compose up -d --build --remove-orphans)
+start_stack_no_build() {
+  log "Starting GGPrint Docker Compose stack (pre-built GHCR images, --no-build)..."
+  (cd "${GGPRINT_DIR}" && docker compose up -d --no-build --remove-orphans)
 }
 
 wait_for_health() {
@@ -272,44 +393,66 @@ wait_for_health() {
   return 1
 }
 
-rollback() {
-  err "Update to ${LATEST_TAG} failed! Rolling back to ${CURRENT_VERSION} (${PREV_REF})..."
+rollback_state_only() {
+  local reason="$1"
+  err "${reason} Rolling back git ref and .env to ${CURRENT_VERSION} (image tag: ${PREV_IMAGE_TAG})..."
   set +e
   git -C "${GGPRINT_DIR}" checkout --force "${PREV_REF}"
-  write_version_file "${CURRENT_VERSION}"
-  build_and_restart
+  write_release_state "${CURRENT_VERSION}" "${PREV_IMAGE_TAG}"
+  write_job_status "failed" "${TARGET_TAG}" "${reason} Rolled back to ${CURRENT_VERSION}."
+  exit 1
+}
+
+rollback_full() {
+  local reason="$1"
+  err "${reason} Rolling back to ${CURRENT_VERSION} (image tag: ${PREV_IMAGE_TAG})..."
+  set +e
+  git -C "${GGPRINT_DIR}" checkout --force "${PREV_REF}"
+  write_release_state "${CURRENT_VERSION}" "${PREV_IMAGE_TAG}"
+  start_stack_no_build
   if wait_for_health; then
     warn "Rollback to ${CURRENT_VERSION} succeeded and Docker stack is healthy."
+    write_job_status "failed" "${TARGET_TAG}" "${reason} Rolled back cleanly to ${CURRENT_VERSION}."
   else
     err "Rollback completed, but health check is still failing. Check 'docker compose logs' immediately!"
+    write_job_status "failed" "${TARGET_TAG}" "${reason} Rollback attempted; check container logs."
   fi
   exit 1
 }
 
 # ---------------------------------------------------------------------------
-# 5. Perform Docker update with automatic rollback on failure
+# 6. Checkout release compose/deploy files, pull GHCR images & restart
 # ---------------------------------------------------------------------------
 log "Fetching tags..."
-git -C "${GGPRINT_DIR}" fetch --tags --force origin
+if ! git -C "${GGPRINT_DIR}" fetch --tags --force origin; then
+  rollback_state_only "Failed to fetch git tags from origin."
+fi
 
 if [[ "${GGPRINT_VERIFY_SIGNATURES}" == "true" ]]; then
-  log "Verifying GPG signature on tag ${LATEST_TAG}..."
-  if ! git -C "${GGPRINT_DIR}" verify-tag "${LATEST_TAG}"; then
-    err "GPG signature verification failed for tag ${LATEST_TAG}. Aborting update."
-    exit 1
+  log "Verifying GPG signature on tag ${TARGET_TAG}..."
+  if ! git -C "${GGPRINT_DIR}" verify-tag "${TARGET_TAG}"; then
+    rollback_state_only "GPG signature verification failed for tag ${TARGET_TAG}."
   fi
 fi
 
-log "Checking out ${LATEST_TAG}..."
-git -C "${GGPRINT_DIR}" checkout --force "tags/${LATEST_TAG}"
-write_version_file "${LATEST_TAG}"
+log "Checking out ${TARGET_TAG} for updated docker-compose.yml and deploy scripts..."
+if ! git -C "${GGPRINT_DIR}" checkout --force "tags/${TARGET_TAG}"; then
+  rollback_state_only "Release tag ${TARGET_TAG} not found in git repository."
+fi
+write_release_state "${TARGET_TAG}" "${TARGET_TAG}"
 
-if ! build_and_restart; then
-  rollback
+log "Pulling pre-built GHCR images for ${TARGET_TAG}..."
+if ! (cd "${GGPRINT_DIR}" && docker compose pull backend frontend); then
+  rollback_state_only "GHCR image pull failed for ${TARGET_TAG} (package may still be publishing)."
+fi
+
+if ! start_stack_no_build; then
+  rollback_full "Failed to start Docker containers for ${TARGET_TAG}."
 fi
 
 if ! wait_for_health; then
-  rollback
+  rollback_full "Health check failed after starting ${TARGET_TAG}."
 fi
 
-log "Successfully updated GGPrint Docker stack from ${CURRENT_VERSION} to ${LATEST_TAG}."
+write_job_status "succeeded" "${TARGET_TAG}" "Updated GGPrint from ${CURRENT_VERSION} to ${TARGET_TAG}."
+log "Successfully updated GGPrint from ${CURRENT_VERSION} to ${TARGET_TAG} using GHCR images."

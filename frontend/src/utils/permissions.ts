@@ -6,6 +6,7 @@ export const PERMISSIONS = {
   FILAMENTS_MANAGE: 'filaments:manage',
   PROFILES_MANAGE: 'profiles:manage',
   SETTINGS_MANAGE: 'settings:manage',
+  UPDATES_MANAGE: 'updates:manage',
   TEACHERS_MANAGE: 'teachers:manage',
   CLASSES_MANAGE_OWN: 'classes:manage_own',
   CLASSES_MANAGE_ALL: 'classes:manage_all',
@@ -64,5 +65,6 @@ export function canAccessStaffPortal(user: UserSummary | null | undefined): bool
     PERMISSIONS.PROFILES_MANAGE,
     PERMISSIONS.TEACHERS_MANAGE,
     PERMISSIONS.SETTINGS_MANAGE,
+    PERMISSIONS.UPDATES_MANAGE,
   ]);
 }

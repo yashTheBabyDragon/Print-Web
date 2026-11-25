@@ -98,6 +98,8 @@ from app.schemas import (
     TestSliceResponse,
     TransferStudentOut,
     TransferStudentRequest,
+    UpdateJobStatusOut,
+    UpdateTriggerRequest,
     WhitelistCsvResult,
     WhitelistEntryCreate,
     WhitelistEntryOut,
@@ -131,7 +133,7 @@ from app.services.serializers import (
     serialize_settings,
 )
 from app.services.slicer import SlicerError, validate_orca_cli_path
-from app.services.updater import check_latest_github_release
+from app.services.updater import check_latest_github_release, trigger_update
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -2799,10 +2801,35 @@ async def admin_decide_approval(
 @router.get("/system/update-status", response_model=SystemUpdateStatusOut)
 async def admin_get_update_status(
     force: bool = False,
-    _admin: User = Depends(require_permission(Permission.SETTINGS_MANAGE)),
+    _caller: User = Depends(require_permission(Permission.UPDATES_MANAGE)),
 ) -> SystemUpdateStatusOut:
-    """Check GitHub Releases for the latest version of GGPrint-Web."""
+    """Check GitHub Releases for the latest version of GGPrint-Web and current updater job status."""
     return await check_latest_github_release(force=force)
+
+
+@router.post(
+    "/system/update-trigger",
+    response_model=UpdateJobStatusOut,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def admin_trigger_update(
+    body: Optional[UpdateTriggerRequest] = None,
+    caller: User = Depends(require_permission(Permission.UPDATES_MANAGE)),
+) -> UpdateJobStatusOut:
+    """Queue an on-demand host update to a specific release tag (or the latest GitHub release)."""
+    target = (body.target_version or "").strip() if body else ""
+    if not target:
+        latest_status = await check_latest_github_release(force=False)
+        target = (latest_status.latest_version or "").strip()
+        if not target:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "NO_RELEASE_AVAILABLE",
+                    "message": "No target version specified and no latest GitHub release was found.",
+                },
+            )
+    return trigger_update(target_version=target, requested_by=f"{caller.name} ({caller.da})")
 
 
 @router.get("/settings", response_model=SystemSettingsOut)

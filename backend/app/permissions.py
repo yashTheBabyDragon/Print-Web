@@ -27,6 +27,7 @@ class Permission(str, Enum):
     PROFILES_MANAGE = "profiles:manage"
     TEACHERS_MANAGE = "teachers:manage"
     SETTINGS_MANAGE = "settings:manage"
+    UPDATES_MANAGE = "updates:manage"
 
 
 VALID_PERMISSION_KEYS: frozenset[str] = frozenset(p.value for p in Permission)
@@ -44,6 +45,7 @@ PERMISSION_CATALOG: list[tuple[Permission, str]] = [
     (Permission.PROFILES_MANAGE, "lab"),
     (Permission.TEACHERS_MANAGE, "administration"),
     (Permission.SETTINGS_MANAGE, "administration"),
+    (Permission.UPDATES_MANAGE, "administration"),
 ]
 
 ROLE_PERMISSIONS: dict[str, frozenset[Permission]] = {

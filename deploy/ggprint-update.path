@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for On-Demand GGPrint Update Requests
+
+[Path]
+PathExists=/opt/ggprint/updater/request.json
+Unit=ggprint-update.service
+
+[Install]
+WantedBy=multi-user.target

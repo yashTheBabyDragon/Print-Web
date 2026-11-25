@@ -555,6 +555,7 @@ export const en: Translations = {
         'profiles:manage': 'Manage OrcaSlicer profiles',
         'teachers:manage': 'Manage teachers & permissions',
         'settings:manage': 'Manage global settings',
+        'updates:manage': 'Manage software updates',
       },
       presets: {
         teacher_default: {
@@ -632,9 +633,9 @@ export const en: Translations = {
       filamentApiTestOk: 'Connected · {count} printer(s) configured',
       filamentApiTestFail: 'Connection failed',
       saveSettings: 'Save settings',
-      updateSectionTitle: 'Software Version & GitHub Releases',
+      updateSectionTitle: 'Software Version & Updates',
       updateSectionDesc:
-        'Checks GitHub Releases for new versions and provides the Docker Compose update command alongside the daily auto-update timer.',
+        'View the installed version, compare against the latest GitHub release, and trigger updates manually on demand.',
       currentVersionLabel: 'Installed version',
       latestVersionLabel: 'Latest GitHub release',
       updateAvailableBadge: 'Update available',
@@ -642,8 +643,19 @@ export const en: Translations = {
       checkUpdatesBtn: 'Check for updates',
       checkingUpdatesBtn: 'Checking…',
       viewReleaseLink: 'View release on GitHub',
-      updateCliHint: 'Run manually on your Docker host (or rely on the daily auto-update timer):',
+      updateCliHint: 'Or run the update manually on your Docker host:',
       updateCheckError: 'Unable to check GitHub Releases',
+      updateNowBtn: 'Update to {version}',
+      updatingNowBtn: 'Updating…',
+      updateConfirmPrompt:
+        'Start updating GGPrint to {version}? The server will briefly restart during the update.',
+      updateQueuedMsg: 'Update to {version} queued…',
+      updateInProgressMsg: 'Updating to {version} in progress…',
+      updateSucceededMsg: 'Update to {version} completed successfully.',
+      updateFailedMsg: 'Update failed: {message}',
+      updaterNotConfiguredHint:
+        'Web-triggered updates are not configured on this host. Run the manual server command below:',
+      updatesTabLabel: 'Updates',
     },
   },
 };
