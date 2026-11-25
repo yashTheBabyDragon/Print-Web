@@ -1,26 +1,54 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import {
   AlertTriangle,
+  ChevronDown,
+  ChevronUp,
   Compass,
   Crosshair,
   Eye,
+  Layers,
+  Loader2,
   Lock,
   Magnet,
   Maximize2,
+  Minus,
   Move,
+  Pause,
+  Play,
+  Plus,
   RotateCcw,
   RotateCw,
+  SlidersHorizontal,
   Upload,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { useTheme } from '../context/ThemeContext';
 import { useI18n } from '../i18n';
+import {
+  FEATURE_COLORS,
+  GCODE_FEATURE_ORDER,
+  GcodePreviewRenderer,
+  parseGcode,
+  TRAVEL_COLOR,
+  type GcodeFeatureType,
+  type ParsedGcode,
+  type PreviewColorMode,
+} from '../three/gcodePreview';
 import { LayOnFaceOverlay } from '../three/layOnFaceOverlay';
 import { UniformScaleGizmo } from '../three/uniformScaleGizmo';
+
+export type WorkspaceMode = 'prepare' | 'preview';
+
+export interface PreviewStatusState {
+  loading: boolean;
+  ready: boolean;
+  error: string | null;
+  layerCount: number;
+}
 
 export interface MeshTransformState {
   posX: number;
@@ -52,6 +80,14 @@ interface BuildPlate3DProps {
   reorienting?: boolean;
   onBoundsChange?: (bounds: BoundingDimensions) => void;
   onDropFile?: (file: File) => void;
+  workspaceMode?: WorkspaceMode;
+  onWorkspaceModeChange?: (mode: WorkspaceMode) => void;
+  canPreview?: boolean;
+  sliceVersion?: number;
+  sliceStale?: boolean;
+  onReSlice?: () => void;
+  slicing?: boolean;
+  onPreviewStateChange?: (state: PreviewStatusState) => void;
 }
 
 type ToolMode = 'move' | 'rotate' | 'scale' | 'snap';
@@ -179,9 +215,21 @@ export function BuildPlate3D({
   reorienting = false,
   onBoundsChange,
   onDropFile,
+  workspaceMode = 'prepare',
+  onWorkspaceModeChange,
+  canPreview = false,
+  sliceVersion = 0,
+  sliceStale = false,
+  onReSlice,
+  slicing = false,
+  onPreviewStateChange,
 }: BuildPlate3DProps) {
   const { theme } = useTheme();
   const { t } = useI18n();
+  const prepareTabId = useId();
+  const previewTabId = useId();
+  const prepareTabRef = useRef<HTMLButtonElement | null>(null);
+  const previewTabRef = useRef<HTMLButtonElement | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -195,6 +243,7 @@ export function BuildPlate3D({
   const meshRef = useRef<THREE.Mesh | null>(null);
   const scaleGizmoRef = useRef<UniformScaleGizmo | null>(null);
   const layOverlayRef = useRef<LayOnFaceOverlay | null>(null);
+  const gcodePreviewRef = useRef<GcodePreviewRenderer | null>(null);
 
   const transformRef = useRef(transform);
   transformRef.current = transform;
@@ -202,6 +251,10 @@ export function BuildPlate3D({
   onTransformChangeRef.current = onTransformChange;
   const onBoundsChangeRef = useRef(onBoundsChange);
   onBoundsChangeRef.current = onBoundsChange;
+  const onPreviewStateChangeRef = useRef(onPreviewStateChange);
+  onPreviewStateChangeRef.current = onPreviewStateChange;
+  const workspaceModeRef = useRef<WorkspaceMode>(workspaceMode);
+  workspaceModeRef.current = workspaceMode;
 
   const bedDimsRef = useRef({ bedX, bedY, bedZ, theme });
   bedDimsRef.current = { bedX, bedY, bedZ, theme };
@@ -226,6 +279,18 @@ export function BuildPlate3D({
     heightMm: 0,
     outOfBounds: false,
   });
+
+  // Preview state
+  const [parsedGcode, setParsedGcode] = useState<ParsedGcode | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [currentLayer, setCurrentLayer] = useState(1);
+  const [currentMove, setCurrentMove] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [colorMode, setColorMode] = useState<PreviewColorMode>('line-type');
+  const [hiddenFeatures, setHiddenFeatures] = useState<Set<GcodeFeatureType>>(() => new Set());
+  const [showTravels, setShowTravels] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(true);
 
   const evaluateBoundsFromBox = useCallback((finalBox: THREE.Box3) => {
     if (finalBox.isEmpty()) return;
@@ -306,17 +371,18 @@ export function BuildPlate3D({
     const pivot = pivotGroupRef.current;
     const scaleGizmo = scaleGizmoRef.current;
     const layOverlay = layOverlayRef.current;
-    const hasMesh = Boolean(pivot && meshRef.current);
+    const isPrepare = workspaceModeRef.current === 'prepare';
+    const hasMesh = Boolean(pivot && meshRef.current && isPrepare);
 
     if (layOverlay) {
       layOverlay.group.visible = tool === 'snap' && hasMesh;
-      if (tool !== 'snap') {
+      if (!hasMesh || tool !== 'snap') {
         layOverlay.setHoveredObject(null);
       }
     }
 
     if (scaleGizmo) {
-      if (tool === 'scale' && meshRef.current && pivot && cameraRef.current) {
+      if (isPrepare && tool === 'scale' && meshRef.current && pivot && cameraRef.current) {
         scaleGizmo.group.visible = true;
         pivot.updateMatrixWorld(true);
         const box = getExactMeshBox(meshRef.current);
@@ -355,7 +421,7 @@ export function BuildPlate3D({
       tc.showY = true;
       tc.showZ = true;
     }
-  }, []);
+  }, [getExactMeshBox]);
 
   // Initialize Three.js Scene + TransformControls once
   useEffect(() => {
@@ -426,8 +492,14 @@ export function BuildPlate3D({
     bedGroupRef.current = bedGroup;
 
     const pivotGroup = new THREE.Group();
+    pivotGroup.visible = workspaceModeRef.current === 'prepare';
     scene.add(pivotGroup);
     pivotGroupRef.current = pivotGroup;
+
+    const gcodePreview = new GcodePreviewRenderer();
+    gcodePreview.group.visible = workspaceModeRef.current === 'preview';
+    scene.add(gcodePreview.group);
+    gcodePreviewRef.current = gcodePreview;
 
     const layOverlay = new LayOnFaceOverlay();
     layOverlay.group.visible = false;
@@ -540,7 +612,7 @@ export function BuildPlate3D({
     };
 
     const onPointerDown = (ev: PointerEvent) => {
-      if (ev.button !== 0 || !meshRef.current) return;
+      if (ev.button !== 0 || !meshRef.current || workspaceModeRef.current !== 'prepare') return;
 
       if (activeToolRef.current === 'scale') {
         updatePointer(ev);
@@ -583,7 +655,12 @@ export function BuildPlate3D({
     };
 
     const onPointerMove = (ev: PointerEvent) => {
-      if (!meshRef.current) return;
+      if (!meshRef.current || workspaceModeRef.current !== 'prepare') {
+        if (renderer.domElement.style.cursor !== 'default') {
+          renderer.domElement.style.cursor = 'default';
+        }
+        return;
+      }
 
       updatePointer(ev);
       raycaster.setFromCamera(pointer, camera);
@@ -714,6 +791,7 @@ export function BuildPlate3D({
       animId = requestAnimationFrame(animate);
       controls.update();
       if (
+        workspaceModeRef.current === 'prepare' &&
         activeToolRef.current === 'scale' &&
         meshRef.current &&
         scaleGizmo.group.visible &&
@@ -759,6 +837,9 @@ export function BuildPlate3D({
       pivotGroup.remove(layOverlay.group);
       layOverlay.dispose();
       layOverlayRef.current = null;
+      scene.remove(gcodePreview.group);
+      gcodePreview.dispose();
+      gcodePreviewRef.current = null;
       controls.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode === container) {
@@ -952,7 +1033,180 @@ export function BuildPlate3D({
     configureGizmoForTool(activeTool);
   }, [activeTool, configureGizmoForTool]);
 
-  // Global keyboard shortcuts (M, R, S, F, Escape)
+  // Sync workspace mode visibility & interaction state
+  useEffect(() => {
+    const isPrepare = workspaceMode === 'prepare';
+    if (pivotGroupRef.current) {
+      pivotGroupRef.current.visible = isPrepare;
+    }
+    if (gcodePreviewRef.current) {
+      gcodePreviewRef.current.group.visible = !isPrepare;
+    }
+    if (!isPrepare) {
+      setDragOverCanvas(false);
+    } else {
+      setIsPlaying(false);
+    }
+    configureGizmoForTool(isPrepare ? activeToolRef.current : null);
+  }, [workspaceMode, configureGizmoForTool]);
+
+  // Load & parse sliced G-code whenever jobId or sliceVersion changes (cached across tab switches)
+  useEffect(() => {
+    if (!jobId || !sliceVersion || sliceVersion <= 0) {
+      gcodePreviewRef.current?.clear();
+      setParsedGcode(null);
+      setLoadingPreview(false);
+      setPreviewError(null);
+      setIsPlaying(false);
+      setCurrentLayer(1);
+      setCurrentMove(0);
+      onPreviewStateChangeRef.current?.({
+        loading: false,
+        ready: false,
+        error: null,
+        layerCount: 0,
+      });
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingPreview(true);
+    setPreviewError(null);
+    setIsPlaying(false);
+    onPreviewStateChangeRef.current?.({
+      loading: true,
+      ready: false,
+      error: null,
+      layerCount: 0,
+    });
+
+    (async () => {
+      try {
+        const gcodeText = await api.fetchJobGcodeText(jobId);
+        if (cancelled) return;
+        const parsed = parseGcode(gcodeText, {
+          bedX: bedDimsRef.current.bedX,
+          bedY: bedDimsRef.current.bedY,
+          posX: transformRef.current.posX,
+          posY: transformRef.current.posY,
+        });
+        if (cancelled) return;
+
+        setParsedGcode(parsed);
+        if (parsed.layerCount > 0) {
+          const lastIdx = parsed.layerCount - 1;
+          const lastMoveCount = parsed.layers[lastIdx].moveCount;
+          setCurrentLayer(parsed.layerCount);
+          setCurrentMove(lastMoveCount);
+          gcodePreviewRef.current?.load(parsed, filamentColor);
+          gcodePreviewRef.current?.setColorMode(colorMode, filamentColor);
+          gcodePreviewRef.current?.setVisibleFeatures(hiddenFeatures, showTravels);
+          gcodePreviewRef.current?.setRange(lastIdx, lastMoveCount, false);
+          onPreviewStateChangeRef.current?.({
+            loading: false,
+            ready: true,
+            error: null,
+            layerCount: parsed.layerCount,
+          });
+        } else {
+          gcodePreviewRef.current?.clear();
+          setCurrentLayer(1);
+          setCurrentMove(0);
+          const emptyMsg = t.workspace.tabs.previewEmpty;
+          setPreviewError(emptyMsg);
+          onPreviewStateChangeRef.current?.({
+            loading: false,
+            ready: false,
+            error: emptyMsg,
+            layerCount: 0,
+          });
+        }
+      } catch (err) {
+        if (cancelled) return;
+        const msg = err instanceof Error ? err.message : t.workspace.tabs.previewError;
+        setParsedGcode(null);
+        gcodePreviewRef.current?.clear();
+        setPreviewError(msg);
+        onPreviewStateChangeRef.current?.({
+          loading: false,
+          ready: false,
+          error: msg,
+          layerCount: 0,
+        });
+      } finally {
+        if (!cancelled) {
+          setLoadingPreview(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, sliceVersion]);
+
+  // Sync preview color mode & filament color
+  useEffect(() => {
+    gcodePreviewRef.current?.setColorMode(colorMode, filamentColor);
+  }, [colorMode, filamentColor]);
+
+  // Sync hidden feature toggles & travel visibility
+  useEffect(() => {
+    gcodePreviewRef.current?.setVisibleFeatures(hiddenFeatures, showTravels);
+  }, [hiddenFeatures, showTravels]);
+
+  // Sync active layer & move draw range
+  useEffect(() => {
+    if (!parsedGcode || parsedGcode.layerCount === 0) return;
+    const layerIdx = Math.max(0, Math.min(parsedGcode.layerCount - 1, currentLayer - 1));
+    const maxMoves = parsedGcode.layers[layerIdx].moveCount;
+    const clampedMove = Math.max(0, Math.min(maxMoves, currentMove));
+    gcodePreviewRef.current?.setRange(layerIdx, clampedMove, isPlaying || clampedMove < maxMoves);
+  }, [parsedGcode, currentLayer, currentMove, isPlaying]);
+
+  // Playback animation loop for bottom move scrubber
+  useEffect(() => {
+    if (!isPlaying || workspaceMode !== 'preview' || !parsedGcode || parsedGcode.layerCount === 0) {
+      return;
+    }
+
+    let rafId = 0;
+    let lastTime = performance.now();
+    let carry = 0;
+
+    const tick = (now: number) => {
+      const dt = Math.min(0.1, (now - lastTime) / 1000);
+      lastTime = now;
+
+      setCurrentMove((prevMove) => {
+        const layerIdx = Math.max(0, Math.min(parsedGcode.layerCount - 1, currentLayer - 1));
+        const maxMoves = parsedGcode.layers[layerIdx].moveCount;
+        const speed = Math.max(24, maxMoves / 2.2);
+        carry += dt * speed;
+        const step = Math.floor(carry);
+        if (step <= 0) return prevMove;
+        carry -= step;
+        const nextMove = prevMove + step;
+        if (nextMove >= maxMoves) {
+          if (currentLayer < parsedGcode.layerCount) {
+            setCurrentLayer((l) => Math.min(parsedGcode.layerCount, l + 1));
+            return 0;
+          }
+          setIsPlaying(false);
+          return maxMoves;
+        }
+        return nextMove;
+      });
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlaying, workspaceMode, parsedGcode, currentLayer]);
+
+  // Global keyboard shortcuts (Prepare: M, R, S, F, Escape | Preview: ArrowUp/Down, Space)
   useEffect(() => {
     const handleKeyDown = (ev: KeyboardEvent) => {
       if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
@@ -968,6 +1222,40 @@ export function BuildPlate3D({
         ) {
           return;
         }
+      }
+
+      if (workspaceModeRef.current === 'preview') {
+        if (!parsedGcode || parsedGcode.layerCount === 0) return;
+        const step = ev.shiftKey ? 10 : 1;
+        if (ev.key === 'ArrowUp') {
+          ev.preventDefault();
+          setIsPlaying(false);
+          setCurrentLayer((prev) => {
+            const next = Math.min(parsedGcode.layerCount, prev + step);
+            setCurrentMove(parsedGcode.layers[next - 1].moveCount);
+            return next;
+          });
+        } else if (ev.key === 'ArrowDown') {
+          ev.preventDefault();
+          setIsPlaying(false);
+          setCurrentLayer((prev) => {
+            const next = Math.max(1, prev - step);
+            setCurrentMove(parsedGcode.layers[next - 1].moveCount);
+            return next;
+          });
+        } else if (ev.key === ' ') {
+          ev.preventDefault();
+          setIsPlaying((prev) => {
+            if (!prev) {
+              const lIdx = Math.max(0, Math.min(parsedGcode.layerCount - 1, currentLayer - 1));
+              if (currentMove >= parsedGcode.layers[lIdx].moveCount) {
+                setCurrentMove(0);
+              }
+            }
+            return !prev;
+          });
+        }
+        return;
       }
 
       if (ev.key === 'Escape') {
@@ -1000,7 +1288,7 @@ export function BuildPlate3D({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [jobId]);
+  }, [jobId, parsedGcode, currentLayer, currentMove]);
 
   const eulerDeg = useMemo(() => {
     const q = new THREE.Quaternion(
@@ -1100,105 +1388,240 @@ export function BuildPlate3D({
   };
 
   const handleCanvasDragOver = (e: React.DragEvent) => {
-    if (!onDropFile) return;
+    if (!onDropFile || workspaceMode !== 'prepare') return;
     e.preventDefault();
     setDragOverCanvas(true);
   };
 
   const handleCanvasDrop = (e: React.DragEvent) => {
-    if (!onDropFile) return;
+    if (!onDropFile || workspaceMode !== 'prepare') return;
     e.preventDefault();
     setDragOverCanvas(false);
     const file = e.dataTransfer.files?.[0];
     if (file) onDropFile(file);
   };
 
+  const handleSelectLayer = (nextLayer: number) => {
+    if (!parsedGcode || parsedGcode.layerCount === 0) return;
+    const clamped = Math.max(1, Math.min(parsedGcode.layerCount, nextLayer));
+    setIsPlaying(false);
+    setCurrentLayer(clamped);
+    setCurrentMove(parsedGcode.layers[clamped - 1].moveCount);
+  };
+
+  const toggleFeatureVisibility = (feature: GcodeFeatureType) => {
+    setHiddenFeatures((prev) => {
+      const next = new Set(prev);
+      if (next.has(feature)) {
+        next.delete(feature);
+      } else {
+        next.add(feature);
+      }
+      return next;
+    });
+  };
+
+  const handleTogglePlay = () => {
+    if (!parsedGcode || parsedGcode.layerCount === 0) return;
+    setIsPlaying((prev) => {
+      if (!prev) {
+        const lIdx = Math.max(0, Math.min(parsedGcode.layerCount - 1, currentLayer - 1));
+        if (currentMove >= parsedGcode.layers[lIdx].moveCount) {
+          setCurrentMove(0);
+        }
+      }
+      return !prev;
+    });
+  };
+
+  const supportsFocusGroup =
+    typeof HTMLElement !== 'undefined' && 'focusGroup' in HTMLElement.prototype;
+
+  const handleTabListKeyDown = (ev: React.KeyboardEvent<HTMLDivElement>) => {
+    if (supportsFocusGroup) return;
+    if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'Home' || ev.key === 'End') {
+      ev.preventDefault();
+      const targetTab =
+        ev.key === 'Home'
+          ? 'prepare'
+          : ev.key === 'End'
+            ? 'preview'
+            : document.activeElement === prepareTabRef.current
+              ? 'preview'
+              : 'prepare';
+      if (targetTab === 'prepare') {
+        prepareTabRef.current?.focus();
+        onWorkspaceModeChange?.('prepare');
+      } else {
+        previewTabRef.current?.focus();
+        if (canPreview) onWorkspaceModeChange?.('preview');
+      }
+    }
+  };
+
+  const activeLayerMeta =
+    parsedGcode && parsedGcode.layerCount > 0
+      ? parsedGcode.layers[Math.max(0, Math.min(parsedGcode.layerCount - 1, currentLayer - 1))]
+      : null;
+  const activeLayerMoveCount = activeLayerMeta?.moveCount ?? 0;
+
   return (
     <div
       data-min-z={minZMm.toFixed(3)}
       data-facet-count={facetCount}
+      data-workspace-mode={workspaceMode}
       onDragOver={handleCanvasDragOver}
       onDragLeave={() => setDragOverCanvas(false)}
       onDrop={handleCanvasDrop}
-      className={`relative h-full w-full min-h-[480px] overflow-hidden bg-[#ECEEF2] dark:bg-[#111317] ${
-        bounds.outOfBounds ? 'ring-2 ring-inset ring-rose-500/70' : ''
+      className={`flex h-full w-full min-h-[520px] flex-col overflow-hidden bg-[#ECEEF2] dark:bg-[#111317] ${
+        workspaceMode === 'prepare' && bounds.outOfBounds
+          ? 'ring-2 ring-inset ring-rose-500/70'
+          : ''
       }`}
     >
-      {/* Full-Bleed Three.js Canvas */}
-      <div ref={containerRef} className="h-full w-full" />
-
-      {/* Drag-over Canvas Overlay */}
-      {dragOverCanvas && (
-        <div className="pointer-events-none absolute inset-4 z-30 flex items-center justify-center rounded-2xl border-2 border-dashed border-[#00A7D9] bg-[#00A7D9]/10">
-          <div className="rounded-xl bg-white px-4 py-2.5 text-sm font-medium text-[#111318] shadow-lg dark:bg-[#15171C] dark:text-[#F4F5F7]">
-            {t.workspace.dropzoneTitle}
-          </div>
-        </div>
-      )}
-
-      {/* Calm Empty Viewport State */}
-      {!jobId && !loadingMesh && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
-          <div className="max-w-xs rounded-2xl border border-black/[0.08] bg-white/95 p-6 text-center shadow-sm dark:border-white/[0.09] dark:bg-[#15171C]/95">
-            <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-[#EFEFF3] text-[#5B616E] dark:bg-[#1D2027] dark:text-[#9399A6]">
-              <Upload className="h-5 w-5" />
-            </div>
-            <h2 className="text-sm font-semibold text-[#111318] dark:text-[#F4F5F7]">
-              {t.workspace.emptyViewportTitle}
-            </h2>
-            <p className="mt-1.5 text-xs leading-relaxed text-[#5B616E] dark:text-[#9399A6]">
-              {t.workspace.emptyViewportDesc}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {/* Loading Indicator */}
-      {loadingMesh && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/25">
-          <div className="rounded-xl border border-black/[0.08] bg-white px-4 py-2.5 text-sm font-medium text-[#111318] shadow-lg dark:border-white/[0.1] dark:bg-[#15171C] dark:text-[#F4F5F7]">
-            {t.workspace.uploadingMesh}
-          </div>
-        </div>
-      )}
-
-      {meshError && (
-        <div className="absolute bottom-4 left-4 right-4 z-20 rounded-xl bg-rose-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm">
-          {meshError}
-        </div>
-      )}
-
-      {/* Out of bounds alert (anchored bottom-center so it never collides with top-center toolbar) */}
-      {bounds.outOfBounds && (
-        <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-20 flex justify-center">
-          <div className="inline-flex items-center gap-2 rounded-full bg-rose-600 px-3.5 py-1.5 text-xs font-medium text-white shadow-md">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            <span>{t.workspace.outOfBoundsBanner}</span>
-          </div>
-        </div>
-      )}
-
-      {/* Top-right Quiet Size Readout + Reset Camera */}
-      <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
-        {jobId && bounds.widthMm > 0 && (
-          <div className="hidden rounded-lg border border-black/[0.08] bg-white/90 px-2.5 py-1 font-mono text-xs tabular-nums text-[#111318] backdrop-blur-md dark:border-white/[0.09] dark:bg-[#15171C]/90 dark:text-[#F4F5F7] xl:block">
-            {bounds.widthMm.toFixed(1)} × {bounds.depthMm.toFixed(1)} × {bounds.heightMm.toFixed(1)} mm
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={handleResetView}
-          title={t.workspace.toolbar.resetView}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-black/[0.08] bg-white/90 px-2.5 py-1 text-xs font-medium text-[#111318] backdrop-blur-md transition-colors hover:bg-white dark:border-white/[0.09] dark:bg-[#15171C]/90 dark:text-[#F4F5F7] dark:hover:bg-[#1D2027]"
+      {/* Top Prepare | Preview Mode Bar */}
+      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-black/[0.08] bg-white/95 px-3 dark:border-white/[0.08] dark:bg-[#15171C]/95">
+        <div
+          role="tablist"
+          aria-label={t.workspace.tabs.tablistLabel}
+          {...({ focusgroup: 'tablist nomemory' } as Record<string, string>)}
+          onKeyDown={handleTabListKeyDown}
+          className="flex h-full items-stretch gap-1"
         >
-          <Eye className="h-3.5 w-3.5 text-[#5B616E] dark:text-[#9399A6]" />
-          <span className="hidden 2xl:inline">{t.workspace.toolbar.resetView}</span>
-        </button>
+          <button
+            ref={prepareTabRef}
+            type="button"
+            role="tab"
+            id={prepareTabId}
+            aria-selected={workspaceMode === 'prepare'}
+            tabIndex={supportsFocusGroup ? undefined : workspaceMode === 'prepare' ? 0 : -1}
+            {...(workspaceMode === 'prepare' ? ({ focusgroupstart: '' } as Record<string, string>) : {})}
+            onClick={() => onWorkspaceModeChange?.('prepare')}
+            className="gg-workspace-tab"
+          >
+            <Move className="h-3.5 w-3.5 shrink-0" />
+            <span>{t.workspace.tabs.prepare}</span>
+          </button>
+
+          <button
+            ref={previewTabRef}
+            type="button"
+            role="tab"
+            id={previewTabId}
+            aria-selected={workspaceMode === 'preview'}
+            aria-disabled={!canPreview}
+            title={!canPreview ? t.workspace.tabs.previewDisabledHint : undefined}
+            tabIndex={supportsFocusGroup ? undefined : workspaceMode === 'preview' ? 0 : -1}
+            {...(workspaceMode === 'preview' ? ({ focusgroupstart: '' } as Record<string, string>) : {})}
+            onClick={() => {
+              if (canPreview) {
+                onWorkspaceModeChange?.('preview');
+              }
+            }}
+            className="gg-workspace-tab"
+          >
+            <Layers className="h-3.5 w-3.5 shrink-0" />
+            <span>{t.workspace.tabs.preview}</span>
+            {canPreview && sliceStale && (
+              <span
+                title={t.workspace.tabs.previewStaleBadge}
+                className="inline-flex items-center rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-700 dark:text-amber-300"
+              >
+                {t.workspace.tabs.previewStaleBadge}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Right Readout & Reset Camera */}
+        <div className="flex items-center gap-2">
+          {workspaceMode === 'prepare' && jobId && bounds.widthMm > 0 && (
+            <div className="hidden rounded-lg border border-black/[0.08] bg-[#F6F7F9] px-2.5 py-1 font-mono text-xs tabular-nums text-[#111318] dark:border-white/[0.09] dark:bg-[#0D0E11] dark:text-[#F4F5F7] md:block">
+              {bounds.widthMm.toFixed(1)} × {bounds.depthMm.toFixed(1)} × {bounds.heightMm.toFixed(1)} mm
+            </div>
+          )}
+          {workspaceMode === 'preview' && parsedGcode && parsedGcode.layerCount > 0 && activeLayerMeta && (
+            <div className="hidden rounded-lg border border-black/[0.08] bg-[#F6F7F9] px-2.5 py-1 font-mono text-xs tabular-nums text-[#111318] dark:border-white/[0.09] dark:bg-[#0D0E11] dark:text-[#F4F5F7] sm:block">
+              {t.workspace.preview.layerOf
+                .replace('{current}', String(currentLayer))
+                .replace('{total}', String(parsedGcode.layerCount))}{' '}
+              · {t.workspace.preview.zHeight.replace('{z}', activeLayerMeta.z.toFixed(2))}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={handleResetView}
+            title={t.workspace.toolbar.resetView}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-black/[0.08] bg-[#F6F7F9] px-2.5 py-1 text-xs font-medium text-[#111318] transition-colors hover:bg-[#EFEFF3] dark:border-white/[0.09] dark:bg-[#0D0E11] dark:text-[#F4F5F7] dark:hover:bg-[#1D2027]"
+          >
+            <Eye className="h-3.5 w-3.5 text-[#5B616E] dark:text-[#9399A6]" />
+            <span className="hidden sm:inline">{t.workspace.toolbar.resetView}</span>
+          </button>
+        </div>
       </div>
 
-      {/* Top-Center OrcaSlicer Floating Toolbar + Anchored Contextual Popover */}
-      {jobId && (
-        <div className="pointer-events-none absolute left-1/2 top-4 z-10 flex w-max max-w-[calc(100%-10rem)] -translate-x-1/2 flex-col items-center gap-2">
+      {/* 3D Viewport Container */}
+      <div className="relative flex-1 min-h-0">
+        {/* Full-Bleed Three.js Canvas */}
+        <div ref={containerRef} className="h-full w-full" />
+
+        {/* Prepare Mode Overlays */}
+        {workspaceMode === 'prepare' && (
+          <>
+            {/* Drag-over Canvas Overlay */}
+            {dragOverCanvas && (
+              <div className="pointer-events-none absolute inset-4 z-30 flex items-center justify-center rounded-2xl border-2 border-dashed border-[#00A7D9] bg-[#00A7D9]/10">
+                <div className="rounded-xl bg-white px-4 py-2.5 text-sm font-medium text-[#111318] shadow-lg dark:bg-[#15171C] dark:text-[#F4F5F7]">
+                  {t.workspace.dropzoneTitle}
+                </div>
+              </div>
+            )}
+
+            {/* Calm Empty Viewport State */}
+            {!jobId && !loadingMesh && (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
+                <div className="max-w-xs rounded-2xl border border-black/[0.08] bg-white/95 p-6 text-center shadow-sm dark:border-white/[0.09] dark:bg-[#15171C]/95">
+                  <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-[#EFEFF3] text-[#5B616E] dark:bg-[#1D2027] dark:text-[#9399A6]">
+                    <Upload className="h-5 w-5" />
+                  </div>
+                  <h2 className="text-sm font-semibold text-[#111318] dark:text-[#F4F5F7]">
+                    {t.workspace.emptyViewportTitle}
+                  </h2>
+                  <p className="mt-1.5 text-xs leading-relaxed text-[#5B616E] dark:text-[#9399A6]">
+                    {t.workspace.emptyViewportDesc}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Loading Indicator */}
+            {loadingMesh && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/25">
+                <div className="rounded-xl border border-black/[0.08] bg-white px-4 py-2.5 text-sm font-medium text-[#111318] shadow-lg dark:border-white/[0.1] dark:bg-[#15171C] dark:text-[#F4F5F7]">
+                  {t.workspace.uploadingMesh}
+                </div>
+              </div>
+            )}
+
+            {meshError && (
+              <div className="absolute bottom-4 left-4 right-4 z-20 rounded-xl bg-rose-600 px-3.5 py-2 text-xs font-medium text-white shadow-sm">
+                {meshError}
+              </div>
+            )}
+
+            {/* Out of bounds alert */}
+            {bounds.outOfBounds && (
+              <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-20 flex justify-center">
+                <div className="inline-flex items-center gap-2 rounded-full bg-rose-600 px-3.5 py-1.5 text-xs font-medium text-white shadow-md">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t.workspace.outOfBoundsBanner}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Top-Center OrcaSlicer Floating Toolbar + Anchored Contextual Popover */}
+            {jobId && (
+              <div className="pointer-events-none absolute left-1/2 top-4 z-10 flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 flex-col items-center gap-2">
           {/* Primary Toolbar */}
           <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-0.5 whitespace-nowrap rounded-full border border-black/[0.08] bg-white/90 p-1 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/90">
             <button
@@ -1608,6 +2031,304 @@ export function BuildPlate3D({
           )}
         </div>
       )}
+          </>
+        )}
+
+        {/* Preview Mode HUD Overlays */}
+        {workspaceMode === 'preview' && (
+          <>
+            {/* Stale Preview Banner */}
+            {sliceStale && (
+              <div className="pointer-events-none absolute left-1/2 top-4 z-20 flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 justify-center">
+                <div className="pointer-events-auto flex items-center gap-2.5 rounded-full border border-amber-500/40 bg-amber-50/95 px-3.5 py-1.5 text-xs font-medium text-amber-900 shadow-md backdrop-blur-md dark:border-amber-400/30 dark:bg-amber-950/90 dark:text-amber-200">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                  <span>{t.workspace.tabs.previewStaleBanner}</span>
+                  {onReSlice && (
+                    <button
+                      type="button"
+                      disabled={slicing}
+                      onClick={onReSlice}
+                      className="rounded-full bg-amber-500 px-2.5 py-0.5 text-[11px] font-semibold text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-45"
+                    >
+                      {slicing ? t.workspace.slicingBtn : t.workspace.tabs.reSliceBtn}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Loading Overlay */}
+            {loadingPreview && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/25">
+                <div className="flex items-center gap-2 rounded-xl border border-black/[0.08] bg-white px-4 py-2.5 text-sm font-medium text-[#111318] shadow-lg dark:border-white/[0.1] dark:bg-[#15171C] dark:text-[#F4F5F7]">
+                  <Loader2 className="h-4 w-4 animate-spin text-[#00A7D9]" />
+                  <span>{t.workspace.tabs.previewLoading}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Error Overlay */}
+            {previewError && !loadingPreview && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center p-4">
+                <div className="max-w-sm rounded-2xl border border-rose-500/30 bg-white/95 p-4 text-center text-xs text-rose-700 shadow-lg dark:bg-[#15171C]/95 dark:text-rose-300">
+                  {previewError}
+                </div>
+              </div>
+            )}
+
+            {/* Top-Left OrcaSlicer Legend & Color Scheme Card */}
+            {parsedGcode && parsedGcode.layerCount > 0 && !loadingPreview && (
+              <div className="pointer-events-auto absolute left-4 top-4 z-10 w-64 rounded-2xl border border-black/[0.08] bg-white/92 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/92">
+                <button
+                  type="button"
+                  onClick={() => setLegendOpen((o) => !o)}
+                  aria-expanded={legendOpen}
+                  className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-[#111318] dark:text-[#F4F5F7]"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <SlidersHorizontal className="h-3.5 w-3.5 text-[#00A7D9]" />
+                    <span>{t.workspace.preview.legendTitle}</span>
+                  </span>
+                  {legendOpen ? (
+                    <ChevronUp className="h-3.5 w-3.5 text-[#5B616E] dark:text-[#9399A6]" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5 text-[#5B616E] dark:text-[#9399A6]" />
+                  )}
+                </button>
+
+                {legendOpen && (
+                  <div className="space-y-2.5 border-t border-black/[0.07] px-3 py-2.5 dark:border-white/[0.08]">
+                    {/* Color Scheme Segmented Toggle */}
+                    <div className="space-y-1">
+                      <div className="text-[10px] font-medium uppercase tracking-wider text-[#5B616E] dark:text-[#9399A6]">
+                        {t.workspace.preview.colorScheme}
+                      </div>
+                      <div
+                        role="group"
+                        aria-label={t.workspace.preview.colorScheme}
+                        className="grid grid-cols-3 rounded-lg bg-black/[0.05] p-0.5 dark:bg-white/[0.07]"
+                      >
+                        {(
+                          [
+                            ['line-type', t.workspace.preview.colorLineType],
+                            ['filament', t.workspace.preview.colorFilament],
+                            ['speed', t.workspace.preview.colorSpeed],
+                          ] as const
+                        ).map(([mode, label]) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            aria-pressed={colorMode === mode}
+                            onClick={() => setColorMode(mode)}
+                            className={`whitespace-nowrap rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors ${
+                              colorMode === mode
+                                ? 'bg-white text-[#111318] shadow-sm dark:bg-[#2B2F3A] dark:text-white'
+                                : 'text-[#5B616E] dark:text-[#9399A6]'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Thermal Speed Gradient Legend */}
+                    {colorMode === 'speed' && parsedGcode.speedRange && (
+                      <div className="space-y-1 rounded-lg bg-black/[0.03] px-2 py-1.5 dark:bg-white/[0.04]">
+                        <div className="flex items-center justify-between gap-2 text-[10px] text-[#5B616E] dark:text-[#9399A6]">
+                          <span className="font-medium uppercase tracking-wider">
+                            {t.workspace.preview.speedLegend}
+                          </span>
+                          <span className="font-mono font-semibold tabular-nums text-[#111318] dark:text-[#F4F5F7]">
+                            {parsedGcode.speedRange.minMmS.toFixed(0)}–{parsedGcode.speedRange.maxMmS.toFixed(0)}{' '}
+                            {t.workspace.preview.speedUnit}
+                          </span>
+                        </div>
+                        <div
+                          aria-label={`${parsedGcode.speedRange.minMmS.toFixed(0)}–${parsedGcode.speedRange.maxMmS.toFixed(0)} ${t.workspace.preview.speedUnit}`}
+                          className="h-2.5 w-full rounded-full ring-1 ring-black/10 dark:ring-white/15"
+                          style={{
+                            background:
+                              'linear-gradient(to right, #2563EB, #06B6D4, #22C55E, #EAB308, #EF4444)',
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {/* Feature Type Toggles */}
+                    <div className="space-y-1">
+                      {GCODE_FEATURE_ORDER.filter((f) => parsedGcode.presentFeatures.includes(f)).map(
+                        (feat) => {
+                          const visible = !hiddenFeatures.has(feat);
+                          const stat = parsedGcode.featureStats?.[feat];
+                          const swatchColor =
+                            colorMode === 'filament' ? filamentColor : FEATURE_COLORS[feat];
+                          return (
+                            <button
+                              key={feat}
+                              type="button"
+                              aria-pressed={visible}
+                              onClick={() => toggleFeatureVisibility(feat)}
+                              className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1 text-left text-xs transition-colors ${
+                                visible
+                                  ? 'text-[#111318] hover:bg-black/[0.04] dark:text-[#F4F5F7] dark:hover:bg-white/[0.05]'
+                                  : 'text-[#5B616E]/55 line-through hover:bg-black/[0.03] dark:text-[#9399A6]/55'
+                              }`}
+                            >
+                              <span className="flex min-w-0 items-center gap-2">
+                                <span
+                                  className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/10 dark:ring-white/15"
+                                  style={{
+                                    backgroundColor: swatchColor,
+                                    opacity: visible ? 1 : 0.3,
+                                  }}
+                                />
+                                <span className="truncate">{t.workspace.preview.features[feat]}</span>
+                              </span>
+                              {stat && (
+                                <span className="shrink-0 font-mono text-[11px] tabular-nums text-[#5B616E] dark:text-[#9399A6]">
+                                  {stat.sharePct.toFixed(1)}%
+                                </span>
+                              )}
+                            </button>
+                          );
+                        }
+                      )}
+
+                      {parsedGcode.totalTravelSegments > 0 && (
+                        <button
+                          type="button"
+                          aria-pressed={showTravels}
+                          onClick={() => setShowTravels((v) => !v)}
+                          className={`flex w-full items-center justify-between rounded-lg px-2 py-1 text-left text-xs transition-colors ${
+                            showTravels
+                              ? 'text-[#111318] hover:bg-black/[0.04] dark:text-[#F4F5F7] dark:hover:bg-white/[0.05]'
+                              : 'text-[#5B616E]/65 hover:bg-black/[0.03] dark:text-[#9399A6]/65'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2">
+                            <span
+                              className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/10 dark:ring-white/15"
+                              style={{
+                                backgroundColor: TRAVEL_COLOR,
+                                opacity: showTravels ? 1 : 0.35,
+                              }}
+                            />
+                            <span>{t.workspace.preview.travel}</span>
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Right-Edge Vertical Layer Slider */}
+            {parsedGcode && parsedGcode.layerCount > 0 && !loadingPreview && (
+              <div className="pointer-events-auto absolute bottom-20 right-4 top-16 z-10 flex flex-col items-center gap-1.5 rounded-2xl border border-black/[0.08] bg-white/92 px-2 py-2.5 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/92">
+                <button
+                  type="button"
+                  aria-label={t.workspace.preview.nextLayer}
+                  title={t.workspace.preview.nextLayer}
+                  disabled={currentLayer >= parsedGcode.layerCount}
+                  onClick={() => handleSelectLayer(currentLayer + 1)}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[#111318] transition-colors hover:bg-black/[0.06] disabled:opacity-35 dark:text-[#F4F5F7] dark:hover:bg-white/[0.08]"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+
+                <div className="flex min-h-[120px] w-7 flex-1 items-stretch justify-center py-1">
+                  <input
+                    type="range"
+                    aria-label={t.workspace.preview.layerSliderLabel}
+                    aria-valuetext={`${t.workspace.preview.layerOf
+                      .replace('{current}', String(currentLayer))
+                      .replace('{total}', String(parsedGcode.layerCount))}, ${t.workspace.preview.zHeight.replace(
+                      '{z}',
+                      (activeLayerMeta?.z ?? 0).toFixed(2)
+                    )}`}
+                    min={1}
+                    max={parsedGcode.layerCount}
+                    step={1}
+                    value={currentLayer}
+                    onChange={(e) => handleSelectLayer(Number(e.target.value))}
+                    style={
+                      {
+                        '--attr-min': 1,
+                        '--attr-max': Math.max(1, parsedGcode.layerCount),
+                        '--control-value': currentLayer,
+                      } as React.CSSProperties
+                    }
+                    className="gg-preview-slider gg-preview-slider-vertical"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  aria-label={t.workspace.preview.prevLayer}
+                  title={t.workspace.preview.prevLayer}
+                  disabled={currentLayer <= 1}
+                  onClick={() => handleSelectLayer(currentLayer - 1)}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[#111318] transition-colors hover:bg-black/[0.06] disabled:opacity-35 dark:text-[#F4F5F7] dark:hover:bg-white/[0.08]"
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </button>
+
+                <div className="shrink-0 border-t border-black/[0.07] pt-1.5 text-center font-mono text-[10px] leading-tight tabular-nums text-[#111318] dark:border-white/[0.08] dark:text-[#F4F5F7]">
+                  <div className="font-semibold">
+                    {currentLayer}/{parsedGcode.layerCount}
+                  </div>
+                  <div className="text-[#5B616E] dark:text-[#9399A6]">
+                    {(activeLayerMeta?.z ?? 0).toFixed(1)}mm
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Bottom-Center Horizontal Move Scrubber + Play/Pause */}
+            {parsedGcode && parsedGcode.layerCount > 0 && !loadingPreview && (
+              <div className="pointer-events-auto absolute bottom-4 left-1/2 z-10 flex w-[min(460px,calc(100%-5.5rem))] -translate-x-1/2 items-center gap-2.5 rounded-full border border-black/[0.08] bg-white/92 px-3 py-1.5 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/92">
+                <button
+                  type="button"
+                  onClick={handleTogglePlay}
+                  aria-label={isPlaying ? t.workspace.preview.pause : t.workspace.preview.play}
+                  title={isPlaying ? t.workspace.preview.pause : t.workspace.preview.play}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[#00A7D9] text-white transition-colors hover:bg-[#0090BD]"
+                >
+                  {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5 translate-x-[0.5px]" />}
+                </button>
+
+                <input
+                  type="range"
+                  aria-label={t.workspace.preview.moveSliderLabel}
+                  aria-valuetext={`${currentMove} / ${activeLayerMoveCount}`}
+                  min={0}
+                  max={Math.max(1, activeLayerMoveCount)}
+                  step={1}
+                  value={currentMove}
+                  onChange={(e) => {
+                    setIsPlaying(false);
+                    setCurrentMove(Number(e.target.value));
+                  }}
+                  style={
+                    {
+                      '--attr-min': 0,
+                      '--attr-max': Math.max(1, activeLayerMoveCount),
+                      '--control-value': currentMove,
+                    } as React.CSSProperties
+                  }
+                  className="gg-preview-slider gg-preview-slider-horizontal flex-1"
+                />
+
+                <span className="shrink-0 font-mono text-[11px] tabular-nums text-[#5B616E] dark:text-[#9399A6]">
+                  {currentMove}/{activeLayerMoveCount}
+                </span>
+              </div>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }

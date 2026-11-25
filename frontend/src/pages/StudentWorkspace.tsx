@@ -16,6 +16,8 @@ import {
   BuildPlate3D,
   type BoundingDimensions,
   type MeshTransformState,
+  type PreviewStatusState,
+  type WorkspaceMode,
 } from '../components/BuildPlate3D';
 import { PrinterSelector } from '../components/PrinterSelector';
 
@@ -54,6 +56,14 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
     outOfBounds: false,
   });
   const [sliceStale, setSliceStale] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('prepare');
+  const [sliceVersion, setSliceVersion] = useState(0);
+  const [previewState, setPreviewState] = useState<PreviewStatusState>({
+    loading: false,
+    ready: false,
+    error: null,
+    layerCount: 0,
+  });
 
   const [loadingInit, setLoadingInit] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -155,6 +165,9 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
       });
       setMeshVersion((v) => v + 1);
       setSliceStale(true);
+      setWorkspaceMode('prepare');
+      setSliceVersion(0);
+      setPreviewState({ loading: false, ready: false, error: null, layerCount: 0 });
     } catch (err) {
       setError(translateApiError(err, t));
     } finally {
@@ -186,6 +199,9 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
       setTransform(IDENTITY_TRANSFORM);
       setMeshVersion((v) => v + 1);
       setSliceStale(true);
+      setWorkspaceMode('prepare');
+      setSliceVersion(0);
+      setPreviewState({ loading: false, ready: false, error: null, layerCount: 0 });
     } catch (err) {
       setError(translateApiError(err, t));
     } finally {
@@ -219,6 +235,8 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
       });
       setJob(sliced);
       setSliceStale(false);
+      setSliceVersion((v) => v + 1);
+      setWorkspaceMode('preview');
     } catch (err) {
       setError(translateApiError(err, t));
     } finally {
@@ -562,46 +580,96 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                       </button>
                     </div>
 
-                    {(!isSlicedAndFresh || job.status !== 'SLICED') && (
-                      <button
-                        type="button"
-                        onClick={handleSlice}
-                        disabled={slicing || bounds.outOfBounds || !selectedSlotId}
-                        className="btn-primary w-full py-2.5"
-                      >
-                        {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
-                        {slicing ? t.workspace.slicingBtn : t.workspace.sliceBtn}
-                      </button>
-                    )}
-
-                    {isPrinterBusy && (
-                      <div className="flex items-start gap-2 rounded-xl bg-amber-500/12 px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300">
-                        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                        <span>{t.workspace.printerBusyNotice}</span>
-                      </div>
-                    )}
-
-                    {isSlicedAndFresh &&
-                      (job.budget_check?.can_auto_submit ? (
+                    {workspaceMode === 'prepare' ? (
+                      !isSlicedAndFresh || job.status !== 'SLICED' ? (
                         <button
                           type="button"
-                          disabled={submitting || isPrinterBusy}
-                          onClick={handleSubmit}
+                          onClick={handleSlice}
+                          disabled={slicing || bounds.outOfBounds || !selectedSlotId}
                           className="btn-primary w-full py-2.5"
                         >
-                          {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                          {submitting ? t.workspace.submittingBtn : t.workspace.submitBtn}
+                          {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
+                          {slicing ? t.workspace.slicingBtn : t.workspace.sliceBtn}
                         </button>
                       ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setWorkspaceMode('preview')}
+                            className="btn-primary w-full py-2.5"
+                          >
+                            {t.workspace.tabs.viewPreview}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleSlice}
+                            disabled={slicing || bounds.outOfBounds || !selectedSlotId}
+                            className="btn-secondary w-full py-2"
+                          >
+                            {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
+                            {slicing ? t.workspace.slicingBtn : t.workspace.tabs.reSliceBtn}
+                          </button>
+                        </>
+                      )
+                    ) : (
+                      <>
+                        {isPrinterBusy && (
+                          <div className="flex items-start gap-2 rounded-xl bg-amber-500/12 px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300">
+                            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                            <span>{t.workspace.printerBusyNotice}</span>
+                          </div>
+                        )}
+
+                        {!isSlicedAndFresh || job.status !== 'SLICED' ? (
+                          <button
+                            type="button"
+                            onClick={handleSlice}
+                            disabled={slicing || bounds.outOfBounds || !selectedSlotId}
+                            className="btn-primary w-full py-2.5"
+                          >
+                            {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
+                            {slicing ? t.workspace.slicingBtn : t.workspace.sliceBtn}
+                          </button>
+                        ) : job.budget_check?.can_auto_submit ? (
+                          <button
+                            type="button"
+                            disabled={
+                              submitting ||
+                              isPrinterBusy ||
+                              previewState.loading ||
+                              !previewState.ready
+                            }
+                            onClick={handleSubmit}
+                            className="btn-primary w-full py-2.5"
+                          >
+                            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                            {submitting ? t.workspace.submittingBtn : t.workspace.submitBtn}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={
+                              submitting ||
+                              isPrinterBusy ||
+                              previewState.loading ||
+                              !previewState.ready
+                            }
+                            onClick={() => setApprovalModalOpen(true)}
+                            className="inline-flex w-full items-center justify-center rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-45"
+                          >
+                            {t.workspace.requestApprovalBtn}
+                          </button>
+                        )}
+
                         <button
                           type="button"
-                          disabled={submitting || isPrinterBusy}
-                          onClick={() => setApprovalModalOpen(true)}
-                          className="inline-flex w-full items-center justify-center rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-45"
+                          onClick={() => setWorkspaceMode('prepare')}
+                          className="btn-secondary w-full py-2"
                         >
-                          {t.workspace.requestApprovalBtn}
+                          {t.workspace.tabs.backToPrepare}
                         </button>
-                      ))}
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -611,7 +679,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
       </aside>
 
       {/* Full-Bleed Three.js Build Plate Stage */}
-      <div className="relative flex-1 min-h-[500px] lg:min-h-0">
+      <div className="relative flex-1 min-h-[520px] lg:min-h-0">
         <BuildPlate3D
           jobId={job?.id ?? null}
           meshVersion={meshVersion}
@@ -625,6 +693,14 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
           reorienting={reorienting}
           onBoundsChange={setBounds}
           onDropFile={handleUploadFile}
+          workspaceMode={workspaceMode}
+          onWorkspaceModeChange={setWorkspaceMode}
+          canPreview={Boolean(job?.gcode_filename && sliceVersion > 0)}
+          sliceVersion={sliceVersion}
+          sliceStale={sliceStale}
+          onReSlice={handleSlice}
+          slicing={slicing}
+          onPreviewStateChange={setPreviewState}
         />
       </div>
 

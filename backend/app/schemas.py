@@ -246,6 +246,7 @@ class JobDetail(BaseModel):
     original_filename: str
     oriented_mesh_url: str
     gcode_filename: Optional[str] = None
+    gcode_url: Optional[str] = None
     pos_x_mm: float
     pos_y_mm: float
     quat_x: float

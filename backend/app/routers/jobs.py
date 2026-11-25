@@ -248,6 +248,27 @@ def get_job_oriented_mesh(
     return FileResponse(path=mesh_path, media_type="model/stl", filename=f"oriented_{job.original_filename}")
 
 
+@router.get("/{job_id}/gcode")
+def get_job_gcode(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """Stream the sliced G-code text file for the owner, assigned teacher, or admin."""
+    job = _load_job_for_user(db, job_id, current_user)
+    gcode_path = Path(job.sliced_output_path) if job.sliced_output_path else None
+    if gcode_path is None or not gcode_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "GCODE_NOT_FOUND", "message": "Sliced G-code file not found"},
+        )
+    return FileResponse(
+        path=gcode_path,
+        media_type="text/plain; charset=utf-8",
+        filename=job.gcode_filename or gcode_path.name,
+    )
+
+
 @router.post("/{job_id}/slice", response_model=JobDetail)
 async def slice_job(
     job_id: int,

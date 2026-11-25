@@ -127,6 +127,9 @@ Response `200`: `JobDetail`.
 ### `GET /api/jobs/{id}/mesh`
 Streams the auto-oriented STL binary (authenticated owner or admin).
 
+### `GET /api/jobs/{id}/gcode`
+Streams the sliced G-code file (`text/plain; charset=utf-8`) for the authenticated owner, assigned teacher, or admin (`404` `GCODE_NOT_FOUND` before slicing). `JobDetail` includes `gcode_url: "/api/jobs/{id}/gcode"` when sliced.
+
 ### `POST /api/jobs/{id}/slice`
 Body (`TransformPayload` — zero slicing settings from student, except optional `supports_enabled` toggle):
 ```json
