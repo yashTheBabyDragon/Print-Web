@@ -45,37 +45,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Set --build-arg INSTALL_ORCASLICER=false to skip (e.g., if mounting /opt/orcaslicer).
 # ---------------------------------------------------------------------------
 RUN if [ "$INSTALL_ORCASLICER" = "true" ] && [ "$(uname -m)" = "x86_64" ]; then \
-      python3 -c '
-import json, os, sys, urllib.request
-ver = os.environ.get("ORCASLICER_VERSION", "latest")
-api = (
-    "https://api.github.com/repos/SoftFever/OrcaSlicer/releases/latest"
-    if ver == "latest"
-    else f"https://api.github.com/repos/SoftFever/OrcaSlicer/releases/tags/{ver}"
-)
-req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json", "User-Agent": "ggprint-docker-build"})
-with urllib.request.urlopen(req, timeout=30) as resp:
-    data = json.loads(resp.read().decode("utf-8"))
-assets = data.get("assets", [])
-def score(a):
-    name = a.get("name", "")
-    low = name.lower()
-    if not low.endswith(".appimage") or "linux" not in low:
-        return -1
-    if "arm" in low or "aarch64" in low:
-        return -1
-    if "ubuntu2404" in low:
-        return 3
-    if "ubuntu2204" in low:
-        return 2
-    return 1
-candidates = sorted((a for a in assets if score(a) > 0), key=score, reverse=True)
-if not candidates:
-    sys.exit("No compatible Linux x86_64 OrcaSlicer AppImage found in release assets")
-url = candidates[0]["browser_download_url"]
-print("Downloading OrcaSlicer:", candidates[0]["name"], url)
-urllib.request.urlretrieve(url, "/tmp/OrcaSlicer.AppImage")
-' && \
+      ORCASLICER_VERSION="$ORCASLICER_VERSION" python3 -c 'import json, os, sys, urllib.request; \
+ver = os.environ.get("ORCASLICER_VERSION", "latest"); \
+api = "https://api.github.com/repos/SoftFever/OrcaSlicer/releases/latest" if ver == "latest" else f"https://api.github.com/repos/SoftFever/OrcaSlicer/releases/tags/{ver}"; \
+req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json", "User-Agent": "ggprint-docker-build"}); \
+resp = urllib.request.urlopen(req, timeout=30); \
+data = json.loads(resp.read().decode("utf-8")); \
+resp.close(); \
+assets = data.get("assets", []); \
+score = lambda a: -1 if not a.get("name", "").lower().endswith(".appimage") or "linux" not in a.get("name", "").lower() or "arm" in a.get("name", "").lower() or "aarch64" in a.get("name", "").lower() else (3 if "ubuntu2404" in a.get("name", "").lower() else (2 if "ubuntu2204" in a.get("name", "").lower() else 1)); \
+candidates = sorted((a for a in assets if score(a) > 0), key=score, reverse=True); \
+candidates or sys.exit("No compatible Linux x86_64 OrcaSlicer AppImage found in release assets"); \
+url = candidates[0]["browser_download_url"]; \
+print("Downloading OrcaSlicer:", candidates[0]["name"], url); \
+urllib.request.urlretrieve(url, "/tmp/OrcaSlicer.AppImage")' && \
       chmod +x /tmp/OrcaSlicer.AppImage && \
       cd /tmp && /tmp/OrcaSlicer.AppImage --appimage-extract >/dev/null && \
       rm -rf /opt/orcaslicer && mv /tmp/squashfs-root /opt/orcaslicer && \
