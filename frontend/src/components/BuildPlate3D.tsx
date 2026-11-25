@@ -255,6 +255,13 @@ export function BuildPlate3D({
   onPreviewStateChangeRef.current = onPreviewStateChange;
   const workspaceModeRef = useRef<WorkspaceMode>(workspaceMode);
   workspaceModeRef.current = workspaceMode;
+  const [isMobileViewport, setIsMobileViewport] = useState(
+    typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(max-width: 767px)').matches
+  );
+  const isMobileViewportRef = useRef(isMobileViewport);
+  isMobileViewportRef.current = isMobileViewport;
 
   const bedDimsRef = useRef({ bedX, bedY, bedZ, theme });
   bedDimsRef.current = { bedX, bedY, bedZ, theme };
@@ -373,16 +380,17 @@ export function BuildPlate3D({
     const layOverlay = layOverlayRef.current;
     const isPrepare = workspaceModeRef.current === 'prepare';
     const hasMesh = Boolean(pivot && meshRef.current && isPrepare);
+    const effectiveTool = isMobileViewportRef.current ? null : tool;
 
     if (layOverlay) {
-      layOverlay.group.visible = tool === 'snap' && hasMesh;
-      if (!hasMesh || tool !== 'snap') {
+      layOverlay.group.visible = effectiveTool === 'snap' && hasMesh;
+      if (!hasMesh || effectiveTool !== 'snap') {
         layOverlay.setHoveredObject(null);
       }
     }
 
     if (scaleGizmo) {
-      if (isPrepare && tool === 'scale' && meshRef.current && pivot && cameraRef.current) {
+      if (isPrepare && effectiveTool === 'scale' && meshRef.current && pivot && cameraRef.current) {
         scaleGizmo.group.visible = true;
         pivot.updateMatrixWorld(true);
         const box = getExactMeshBox(meshRef.current);
@@ -402,19 +410,25 @@ export function BuildPlate3D({
 
     if (!tc) return;
 
-    if (!hasMesh || !pivot || tool === null || tool === 'snap' || tool === 'scale') {
+    if (
+      !hasMesh ||
+      !pivot ||
+      effectiveTool === null ||
+      effectiveTool === 'snap' ||
+      effectiveTool === 'scale'
+    ) {
       tc.detach();
       return;
     }
 
     tc.attach(pivot);
-    if (tool === 'move') {
+    if (effectiveTool === 'move') {
       tc.setMode('translate');
       tc.setSpace('world');
       tc.showX = true;
       tc.showY = true;
       tc.showZ = false;
-    } else if (tool === 'rotate') {
+    } else if (effectiveTool === 'rotate') {
       tc.setMode('rotate');
       tc.setSpace('world');
       tc.showX = true;
@@ -422,6 +436,19 @@ export function BuildPlate3D({
       tc.showZ = true;
     }
   }, [getExactMeshBox]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const syncViewport = () => {
+      isMobileViewportRef.current = mediaQuery.matches;
+      setIsMobileViewport(mediaQuery.matches);
+      configureGizmoForTool(activeToolRef.current);
+    };
+    syncViewport();
+    mediaQuery.addEventListener('change', syncViewport);
+    return () => mediaQuery.removeEventListener('change', syncViewport);
+  }, [configureGizmoForTool]);
 
   // Initialize Three.js Scene + TransformControls once
   useEffect(() => {
@@ -612,7 +639,14 @@ export function BuildPlate3D({
     };
 
     const onPointerDown = (ev: PointerEvent) => {
-      if (ev.button !== 0 || !meshRef.current || workspaceModeRef.current !== 'prepare') return;
+      if (
+        isMobileViewportRef.current ||
+        ev.button !== 0 ||
+        !meshRef.current ||
+        workspaceModeRef.current !== 'prepare'
+      ) {
+        return;
+      }
 
       if (activeToolRef.current === 'scale') {
         updatePointer(ev);
@@ -655,7 +689,11 @@ export function BuildPlate3D({
     };
 
     const onPointerMove = (ev: PointerEvent) => {
-      if (!meshRef.current || workspaceModeRef.current !== 'prepare') {
+      if (
+        isMobileViewportRef.current ||
+        !meshRef.current ||
+        workspaceModeRef.current !== 'prepare'
+      ) {
         if (renderer.domElement.style.cursor !== 'default') {
           renderer.domElement.style.cursor = 'default';
         }
@@ -1473,7 +1511,7 @@ export function BuildPlate3D({
       onDragOver={handleCanvasDragOver}
       onDragLeave={() => setDragOverCanvas(false)}
       onDrop={handleCanvasDrop}
-      className={`flex h-full w-full min-h-[520px] flex-col overflow-hidden bg-[#ECEEF2] dark:bg-[#111317] ${
+      className={`flex h-full w-full min-h-[280px] flex-col overflow-hidden bg-[#ECEEF2] dark:bg-[#111317] md:min-h-[420px] ${
         workspaceMode === 'prepare' && bounds.outOfBounds
           ? 'ring-2 ring-inset ring-rose-500/70'
           : ''
@@ -1563,7 +1601,7 @@ export function BuildPlate3D({
       {/* 3D Viewport Container */}
       <div className="relative flex-1 min-h-0">
         {/* Full-Bleed Three.js Canvas */}
-        <div ref={containerRef} className="h-full w-full" />
+        <div ref={containerRef} className="h-full w-full touch-none select-none" />
 
         {/* Prepare Mode Overlays */}
         {workspaceMode === 'prepare' && (
@@ -1620,7 +1658,7 @@ export function BuildPlate3D({
             )}
 
             {/* Top-Center OrcaSlicer Floating Toolbar + Anchored Contextual Popover */}
-            {jobId && (
+            {jobId && !isMobileViewport && (
               <div className="pointer-events-none absolute left-1/2 top-4 z-10 flex w-max max-w-[calc(100%-2rem)] -translate-x-1/2 flex-col items-center gap-2">
           {/* Primary Toolbar */}
           <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-0.5 whitespace-nowrap rounded-full border border-black/[0.08] bg-white/90 p-1 shadow-lg backdrop-blur-md dark:border-white/[0.1] dark:bg-[#15171C]/90">

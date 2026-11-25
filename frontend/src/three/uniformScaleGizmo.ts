@@ -42,6 +42,7 @@ export class UniformScaleGizmo {
 
   private _isDragging = false;
   private _isHovered = false;
+  private _touchMode = false;
 
   private readonly handlePos = new THREE.Vector3();
   private readonly cornerPos = new THREE.Vector3();
@@ -132,6 +133,11 @@ export class UniformScaleGizmo {
     return this._isDragging;
   }
 
+  /** Enables larger visual handle and hit colliders for coarse touch pointers. */
+  setTouchMode(enabled: boolean): void {
+    this._touchMode = enabled;
+  }
+
   /**
    * Updates the Box3 wireframe and scales/positions the single corner arm and
    * grab cube based on camera distance so the gizmo stays an ergonomic size at any zoom.
@@ -162,7 +168,8 @@ export class UniformScaleGizmo {
 
     const dist = Math.max(camera.position.distanceTo(this.handlePos), 1e-3);
     armLength = THREE.MathUtils.clamp(dist * 0.045, 1.5, 45);
-    const cubeSize = THREE.MathUtils.clamp(dist * 0.018, 0.6, 18);
+    const touchBoost = this._touchMode ? 1.25 : 1.0;
+    const cubeSize = THREE.MathUtils.clamp(dist * 0.018 * touchBoost, 0.6, 22);
     const stemRadius = cubeSize * 0.15;
 
     this.handlePos.copy(this.cornerPos).addScaledVector(OUTWARD_DIR, armLength);
@@ -174,11 +181,11 @@ export class UniformScaleGizmo {
     this.cubeMesh.position.copy(this.handlePos);
     this.cubeMesh.scale.setScalar(cubeSize);
 
-    const hitSphereRadius = cubeSize * 1.65;
+    const hitSphereRadius = cubeSize * (this._touchMode ? 2.4 : 1.65);
     this.hitHandleMesh.position.copy(this.handlePos);
     this.hitHandleMesh.scale.setScalar(hitSphereRadius);
 
-    const hitArmRadius = cubeSize * 0.8;
+    const hitArmRadius = cubeSize * (this._touchMode ? 1.35 : 0.8);
     this.hitArmMesh.position.copy(this.midpoint);
     this.hitArmMesh.scale.set(hitArmRadius, armLength, hitArmRadius);
 

@@ -37,6 +37,9 @@ export const fr = {
     roleTeacher: 'Enseignant',
     activeBudget: 'Budget actif',
     budgetTooltip: 'Masse active utilisée sur votre limite autorisée',
+    menu: 'Menu',
+    openMenu: 'Ouvrir le menu',
+    closeMenu: 'Fermer le menu',
   },
   status: {
     DRAFT: 'Brouillon',
@@ -281,6 +284,10 @@ export const fr = {
   admin: {
     title: 'Administration',
     subtitle: 'Imprimantes, filaments, profils OrcaSlicer, étudiants et approbations.',
+    mobileWarningTitle: 'Interface réservée aux ordinateurs',
+    mobileWarningDesc:
+      'Le tableau de bord enseignant et administrateur nécessite un écran plus large (tablette ou ordinateur) pour gérer les imprimantes, classes et approbations.',
+    backToStudentView: 'Retour à l’atelier d’impression',
     tabs: {
       printers: 'Imprimantes & MMU',
       filaments: 'Filaments & Profils',

@@ -32,7 +32,7 @@ export function PrinterSelector({
               key={printer.id}
               type="button"
               onClick={() => onSelectPrinter(printer)}
-              className={`flex w-full items-center justify-between gap-2.5 px-3 py-2.5 text-left transition-colors ${
+              className={`flex min-h-[44px] w-full items-center justify-between gap-2.5 px-3 py-3 text-left transition-colors sm:py-2.5 ${
                 isSelected
                   ? 'bg-[#00A7D9]/[0.09] dark:bg-[#00A7D9]/[0.14]'
                   : 'hover:bg-black/[0.025] dark:hover:bg-white/[0.03]'
@@ -104,7 +104,7 @@ export function PrinterSelector({
                     type="button"
                     disabled={!loaded}
                     onClick={() => loaded && onSelectSlot(slot.id)}
-                    className={`flex w-full items-center justify-between gap-2.5 rounded-xl px-2.5 py-2 text-left text-xs transition-colors ${
+                    className={`flex min-h-[44px] w-full items-center justify-between gap-2.5 rounded-xl px-3 py-2.5 text-left text-xs transition-colors sm:px-2.5 sm:py-2 ${
                       !loaded
                         ? 'cursor-not-allowed opacity-45'
                         : isSelected

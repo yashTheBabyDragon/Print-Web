@@ -178,9 +178,9 @@ export function AuthPage() {
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#F6F7F9] text-[#111318] dark:bg-[#0D0E11] dark:text-[#F4F5F7]">
+    <div className="flex min-h-screen min-h-[100dvh] flex-col bg-[#F6F7F9] text-[#111318] dark:bg-[#0D0E11] dark:text-[#F4F5F7]">
       {/* Minimal Top Utility Bar */}
-      <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 py-5">
+      <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-4 py-3 sm:px-6 sm:py-5">
         <div className="flex items-center gap-2.5">
           <Logo size={26} />
           <span className="text-[15px] font-semibold tracking-tight">{t.common.appName}</span>
@@ -207,25 +207,25 @@ export function AuthPage() {
       </div>
 
       {/* Main Split Studio Auth */}
-      <div className="mx-auto flex w-full max-w-5xl flex-1 items-center px-6 pb-14 pt-4">
-        <div className="grid w-full grid-cols-1 items-center gap-10 lg:grid-cols-12 lg:gap-14">
+      <div className="mx-auto flex w-full max-w-5xl flex-1 items-start px-4 pb-[max(2.5rem,env(safe-area-inset-bottom))] pt-2 sm:items-center sm:px-6 sm:pb-14 sm:pt-4">
+        <div className="grid w-full grid-cols-1 items-center gap-6 sm:gap-8 lg:grid-cols-12 lg:gap-14">
           {/* Left Narrative */}
-          <div className="space-y-6 lg:col-span-6">
-            <div className="space-y-3">
-              <p className="text-sm font-medium text-[#007BA3] dark:text-[#38C6F4]">
+          <div className="space-y-4 sm:space-y-6 lg:col-span-6">
+            <div className="space-y-2 sm:space-y-3">
+              <p className="text-xs font-medium text-[#007BA3] dark:text-[#38C6F4] sm:text-sm">
                 {t.common.institution}
               </p>
-              <h1 className="text-3xl font-semibold tracking-tight text-[#111318] dark:text-[#F4F5F7] sm:text-4xl">
+              <h1 className="text-2xl font-semibold tracking-tight text-[#111318] dark:text-[#F4F5F7] sm:text-3xl lg:text-4xl">
                 {t.auth.title}
               </h1>
-              <p className="max-w-md text-[15px] leading-relaxed text-[#5B616E] dark:text-[#9399A6]">
+              <p className="max-w-md text-sm leading-relaxed text-[#5B616E] dark:text-[#9399A6] sm:text-[15px]">
                 {t.auth.subtitle}
               </p>
             </div>
 
             {/* Quiet Dev Quick-Fill Strip when dev_mode is true */}
             {authMode?.dev_mode && (
-              <div className="border-t border-black/[0.08] pt-5 dark:border-white/[0.08]">
+              <div className="border-t border-black/[0.08] pt-4 sm:pt-5 dark:border-white/[0.08]">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
                     {t.auth.devSandboxTitle} · {t.auth.devSandboxDesc}
@@ -270,9 +270,9 @@ export function AuthPage() {
 
           {/* Right Form Surface */}
           <div className="lg:col-span-6">
-            <div className="studio-surface mx-auto max-w-md p-6 sm:p-8">
+            <div className="studio-surface mx-auto w-full max-w-md p-5 sm:p-8">
               {/* Segmented Control */}
-              <div className="mb-6 grid grid-cols-2 rounded-full bg-[#EFEFF3] p-1 dark:bg-[#1D2027]">
+              <div className="mb-5 grid grid-cols-2 rounded-full bg-[#EFEFF3] p-1 dark:bg-[#1D2027] sm:mb-6">
                 <button
                   type="button"
                   onClick={() => {
@@ -280,7 +280,7 @@ export function AuthPage() {
                     setError(null);
                     setPendingConfirmationTeacher(null);
                   }}
-                  className={`rounded-full py-1.5 text-sm font-medium transition-colors ${
+                  className={`min-h-[44px] rounded-full py-2 text-sm font-medium transition-colors sm:min-h-0 sm:py-1.5 ${
                     tab === 'login'
                       ? 'bg-white text-[#111318] shadow-sm dark:bg-[#2B2F3A] dark:text-white'
                       : 'text-[#5B616E] hover:text-[#111318] dark:text-[#9399A6] dark:hover:text-[#F4F5F7]'
@@ -295,7 +295,7 @@ export function AuthPage() {
                     setError(null);
                     setPendingConfirmationTeacher(null);
                   }}
-                  className={`rounded-full py-1.5 text-sm font-medium transition-colors ${
+                  className={`min-h-[44px] rounded-full py-2 text-sm font-medium transition-colors sm:min-h-0 sm:py-1.5 ${
                     tab === 'register'
                       ? 'bg-white text-[#111318] shadow-sm dark:bg-[#2B2F3A] dark:text-white'
                       : 'text-[#5B616E] hover:text-[#111318] dark:text-[#9399A6] dark:hover:text-[#F4F5F7]'

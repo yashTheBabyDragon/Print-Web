@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
   FileUp,
   Loader2,
   Upload,
@@ -75,6 +76,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [approvalModalOpen, setApprovalModalOpen] = useState(false);
+  const [mobilePrinterOpen, setMobilePrinterOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -165,6 +167,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
       });
       setMeshVersion((v) => v + 1);
       setSliceStale(true);
+      setMobilePrinterOpen(false);
       setWorkspaceMode('prepare');
       setSliceVersion(0);
       setPreviewState({ loading: false, ready: false, error: null, layerCount: 0 });
@@ -199,6 +202,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
       setTransform(IDENTITY_TRANSFORM);
       setMeshVersion((v) => v + 1);
       setSliceStale(true);
+      setMobilePrinterOpen(false);
       setWorkspaceMode('prepare');
       setSliceVersion(0);
       setPreviewState({ loading: false, ready: false, error: null, layerCount: 0 });
@@ -291,35 +295,76 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
   const remainingAfter = availableGrams - estimatedGrams;
 
   return (
-    <div className="flex min-h-[calc(100vh-3.5rem)] flex-col lg:h-[calc(100vh-3.5rem)] lg:flex-row lg:overflow-hidden">
-      {/* Left Matte Studio Inspector */}
-      <aside className="flex w-full shrink-0 flex-col border-b border-black/[0.08] bg-white dark:border-white/[0.08] dark:bg-[#15171C] lg:w-[340px] lg:border-b-0 lg:border-r">
-        <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-5">
-          {/* Printer & Filament Section */}
+    <div className="flex min-h-[calc(100dvh-3.5rem)] flex-col md:h-[calc(100dvh-3.5rem)] md:flex-row md:overflow-hidden">
+      {/* Left Matte Studio Inspector (stacks below 3D stage on mobile, side-by-side on md+) */}
+      <aside className="order-2 flex w-full shrink-0 flex-col border-t border-black/[0.08] bg-white dark:border-white/[0.08] dark:bg-[#15171C] md:order-1 md:w-[290px] md:border-r md:border-t-0 lg:w-[340px]">
+        <div className="flex-1 space-y-4 overflow-y-auto p-3.5 sm:p-4 md:space-y-5 lg:p-5">
+          {/* Printer & Filament Section (collapsible on mobile, always expanded on md+) */}
           <section className="space-y-3">
-            <h2 className="text-xs font-semibold text-[#111318] dark:text-[#F4F5F7]">
-              {t.workspace.step1Title}
-            </h2>
-            {loadingInit ? (
-              <div className="flex items-center gap-2 py-4 text-xs text-[#5B616E] dark:text-[#9399A6]">
-                <Loader2 className="h-4 w-4 animate-spin text-[#00A7D9]" />
-                {t.common.loading}
-              </div>
-            ) : (
-              <PrinterSelector
-                printers={printers}
-                selectedPrinterId={selectedPrinterId}
-                selectedSlotId={selectedSlotId}
-                onSelectPrinter={handleSelectPrinter}
-                onSelectSlot={handleSelectSlot}
-              />
-            )}
-            {isPrinterBusy && (
-              <div className="flex items-start gap-2 rounded-xl bg-amber-500/12 px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300">
-                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>{t.workspace.printerBusyNotice}</span>
-              </div>
-            )}
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setMobilePrinterOpen((prev) => !prev)}
+                aria-expanded={mobilePrinterOpen}
+                className="flex min-h-[44px] w-full items-center justify-between gap-2 rounded-xl px-1 text-left transition-colors active:bg-black/[0.04] dark:active:bg-white/[0.05] md:hidden"
+              >
+                <div className="min-w-0 flex-1">
+                  <h2 className="text-xs font-semibold text-[#111318] dark:text-[#F4F5F7]">
+                    {t.workspace.step1Title}
+                  </h2>
+                  {!mobilePrinterOpen && activePrinter && (
+                    <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[#5B616E] dark:text-[#9399A6]">
+                      <span className="truncate font-medium text-[#111318] dark:text-[#F4F5F7]">
+                        {activePrinter.name}
+                      </span>
+                      {activeSlot && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span
+                            className="inline-block h-2.5 w-2.5 shrink-0 rounded-full border border-black/15 dark:border-white/20"
+                            style={{ backgroundColor: activeSlot.color_hex || '#00A7D9' }}
+                          />
+                          <span className="truncate">
+                            {activeSlot.filament_name || activeSlot.label}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <ChevronDown
+                  className={`h-4 w-4 shrink-0 text-[#5B616E] transition-transform dark:text-[#9399A6] ${
+                    mobilePrinterOpen ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+              <h2 className="hidden text-xs font-semibold text-[#111318] dark:text-[#F4F5F7] md:block">
+                {t.workspace.step1Title}
+              </h2>
+            </div>
+
+            <div className={`${mobilePrinterOpen ? 'block' : 'hidden'} space-y-3 md:block`}>
+              {loadingInit ? (
+                <div className="flex items-center gap-2 py-4 text-xs text-[#5B616E] dark:text-[#9399A6]">
+                  <Loader2 className="h-4 w-4 animate-spin text-[#00A7D9]" />
+                  {t.common.loading}
+                </div>
+              ) : (
+                <PrinterSelector
+                  printers={printers}
+                  selectedPrinterId={selectedPrinterId}
+                  selectedSlotId={selectedSlotId}
+                  onSelectPrinter={handleSelectPrinter}
+                  onSelectSlot={handleSelectSlot}
+                />
+              )}
+              {isPrinterBusy && (
+                <div className="flex items-start gap-2 rounded-xl bg-amber-500/12 px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{t.workspace.printerBusyNotice}</span>
+                </div>
+              )}
+            </div>
           </section>
 
           <div className="h-px bg-black/[0.07] dark:bg-white/[0.08]" />
@@ -331,6 +376,8 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
             </h2>
 
             <div
+              role="button"
+              tabIndex={0}
               onDragOver={(e) => {
                 e.preventDefault();
                 setDragOver(true);
@@ -343,7 +390,13 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                 if (dropped) handleUploadFile(dropped);
               }}
               onClick={() => fileInputRef.current?.click()}
-              className={`cursor-pointer rounded-xl border border-dashed px-4 py-4 text-center transition-colors ${
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  fileInputRef.current?.click();
+                }
+              }}
+              className={`cursor-pointer rounded-xl border border-dashed px-4 py-4 text-center transition-colors focus:outline-none focus:ring-2 focus:ring-[#00A7D9]/40 ${
                 dragOver
                   ? 'border-[#00A7D9] bg-[#00A7D9]/[0.07]'
                   : 'border-black/[0.15] bg-[#F6F7F9] hover:border-[#00A7D9]/70 dark:border-white/[0.14] dark:bg-[#0D0E11]'
@@ -375,9 +428,9 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                     {t.workspace.dropzoneSubtitle}
                   </p>
                   {job?.original_filename && (
-                    <span className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-[#00A7D9]/12 px-2 py-0.5 font-mono text-[11px] font-medium text-[#007BA3] dark:text-[#38C6F4]">
-                      <FileUp className="h-3 w-3" />
-                      {job.original_filename}
+                    <span className="mt-1 inline-flex max-w-full items-center gap-1.5 rounded-md bg-[#00A7D9]/12 px-2 py-0.5 font-mono text-[11px] font-medium text-[#007BA3] dark:text-[#38C6F4]">
+                      <FileUp className="h-3 w-3 shrink-0" />
+                      <span className="truncate">{job.original_filename}</span>
                     </span>
                   )}
                 </div>
@@ -397,7 +450,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                     id="sample-model-select"
                     value={selectedSampleId}
                     onChange={(e) => setSelectedSampleId(e.target.value)}
-                    className="studio-input flex-1 py-1.5 text-xs"
+                    className="studio-input min-h-[44px] min-w-0 flex-1 py-2 text-xs md:min-h-0 md:py-1.5"
                   >
                     {samples.map((s) => (
                       <option key={s.id} value={s.id}>
@@ -409,7 +462,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                     type="button"
                     disabled={uploading || !selectedSampleId || !selectedSlotId}
                     onClick={handleLoadSample}
-                    className="btn-secondary shrink-0 px-3 py-1.5 text-xs"
+                    className="btn-secondary min-h-[44px] shrink-0 px-3.5 py-2 text-xs md:min-h-0 md:px-3 md:py-1.5"
                   >
                     {t.workspace.loadSampleBtn}
                   </button>
@@ -418,7 +471,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
             )}
 
             {job && (
-              <p className="text-[11px] leading-relaxed text-[#5B616E] dark:text-[#9399A6]">
+              <p className="hidden text-[11px] leading-relaxed text-[#5B616E] dark:text-[#9399A6] md:block">
                 {t.workspace.autoOrientHint}
               </p>
             )}
@@ -427,15 +480,15 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
 
         {/* Pinned Bottom Slice Summary & Action Footer */}
         {(job || error || successMsg) && (
-          <div className="border-t border-black/[0.08] bg-[#F6F7F9] p-4 dark:border-white/[0.08] dark:bg-[#0D0E11]">
+          <div className="border-t border-black/[0.08] bg-[#F6F7F9] p-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))] dark:border-white/[0.08] dark:bg-[#0D0E11] sm:p-4">
             {error && (
-              <div className="mb-3 flex items-start gap-2 rounded-xl bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
-                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span className="flex-1">{error}</span>
+              <div className="mb-3 flex items-center gap-2 rounded-xl bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 flex-1 break-words">{error}</span>
                 <button
                   type="button"
                   onClick={() => setError(null)}
-                  className="font-medium underline"
+                  className="inline-flex min-h-[44px] shrink-0 items-center px-1.5 font-medium underline md:min-h-0 md:px-0"
                 >
                   {t.common.close}
                 </button>
@@ -443,7 +496,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
             )}
 
             {successMsg && (
-              <div className="mb-3 space-y-2 rounded-xl bg-emerald-500/10 px-3 py-2.5 text-xs text-emerald-800 dark:text-emerald-300">
+              <div className="mb-3 space-y-1.5 rounded-xl bg-emerald-500/10 px-3 py-2.5 text-xs text-emerald-800 dark:text-emerald-300">
                 <div className="flex items-center gap-2 font-medium">
                   <CheckCircle2 className="h-4 w-4 shrink-0" />
                   <span>{successMsg}</span>
@@ -451,7 +504,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                 <button
                   type="button"
                   onClick={onNavigateMyPrints}
-                  className="text-xs font-semibold text-[#007BA3] underline dark:text-[#38C6F4]"
+                  className="inline-flex min-h-[44px] items-center text-xs font-semibold text-[#007BA3] underline dark:text-[#38C6F4] md:min-h-0"
                 >
                   {t.workspace.viewInMyPrints}
                 </button>
@@ -469,7 +522,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                 {job.status === 'SLICED' && job.estimated_grams != null && (
                   <div className="space-y-2.5">
                     <div className="grid grid-cols-3 gap-2 border-b border-black/[0.07] pb-2.5 dark:border-white/[0.08]">
-                      <div>
+                      <div className="min-w-0">
                         <div className="text-[11px] text-[#5B616E] dark:text-[#9399A6]">
                           {t.workspace.estimateGrams}
                         </div>
@@ -477,7 +530,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                           {job.estimated_grams.toFixed(1)} {t.common.grams}
                         </div>
                       </div>
-                      <div>
+                      <div className="min-w-0">
                         <div className="text-[11px] text-[#5B616E] dark:text-[#9399A6]">
                           {t.workspace.estimateTime}
                         </div>
@@ -485,7 +538,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                           {formatMinutes(job.estimated_minutes, lang)}
                         </div>
                       </div>
-                      <div>
+                      <div className="min-w-0">
                         <div className="text-[11px] text-[#5B616E] dark:text-[#9399A6]">
                           {t.workspace.estimateLayers}
                         </div>
@@ -495,7 +548,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                       <span className="text-[#5B616E] dark:text-[#9399A6]">
                         {t.workspace.supportsTitle}
                       </span>
@@ -512,7 +565,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                       </span>
                     </div>
 
-                    <div className="flex items-center justify-between text-xs tabular-nums">
+                    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-xs tabular-nums">
                       <span className="text-[#5B616E] dark:text-[#9399A6]">
                         {t.workspace.budgetImpact}
                       </span>
@@ -547,7 +600,18 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                 {/* Primary CTA + Organic Tree Supports Toggle */}
                 {!isAlreadySubmitted && (
                   <div className="flex flex-col gap-2.5">
-                    <div className="flex items-center justify-between gap-3 rounded-xl border border-black/[0.07] bg-white px-3 py-2.5 dark:border-white/[0.08] dark:bg-[#15171C]">
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={supportsEnabled}
+                      aria-label={t.workspace.supportsTitle}
+                      onClick={() => {
+                        setSupportsEnabled((prev) => !prev);
+                        setSliceStale(true);
+                        setSuccessMsg(null);
+                      }}
+                      className="flex min-h-[48px] w-full cursor-pointer items-center justify-between gap-3 rounded-xl border border-black/[0.07] bg-white px-3 py-2.5 text-left transition-colors hover:border-black/[0.12] focus:outline-none focus:ring-2 focus:ring-[#00A7D9]/40 dark:border-white/[0.08] dark:bg-[#15171C] dark:hover:border-white/[0.14]"
+                    >
                       <div className="min-w-0">
                         <div className="text-xs font-medium text-[#111318] dark:text-[#F4F5F7]">
                           {t.workspace.supportsTitle}
@@ -556,17 +620,9 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                           {t.workspace.supportsSubtitle}
                         </div>
                       </div>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={supportsEnabled}
-                        aria-label={t.workspace.supportsTitle}
-                        onClick={() => {
-                          setSupportsEnabled((prev) => !prev);
-                          setSliceStale(true);
-                          setSuccessMsg(null);
-                        }}
-                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[#00A7D9]/40 ${
+                      <span
+                        aria-hidden="true"
+                        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
                           supportsEnabled
                             ? 'bg-[#00A7D9]'
                             : 'bg-black/[0.14] dark:bg-white/[0.16]'
@@ -577,26 +633,26 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                             supportsEnabled ? 'translate-x-[22px]' : 'translate-x-[2px]'
                           }`}
                         />
-                      </button>
-                    </div>
+                      </span>
+                    </button>
 
                     {workspaceMode === 'prepare' ? (
                       !isSlicedAndFresh || job.status !== 'SLICED' ? (
-                        <button
-                          type="button"
-                          onClick={handleSlice}
-                          disabled={slicing || bounds.outOfBounds || !selectedSlotId}
-                          className="btn-primary w-full py-2.5"
-                        >
-                          {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
-                          {slicing ? t.workspace.slicingBtn : t.workspace.sliceBtn}
-                        </button>
+                      <button
+                        type="button"
+                        onClick={handleSlice}
+                        disabled={slicing || bounds.outOfBounds || !selectedSlotId}
+                        className="btn-primary min-h-[44px] w-full py-2.5"
+                      >
+                        {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
+                        {slicing ? t.workspace.slicingBtn : t.workspace.sliceBtn}
+                      </button>
                       ) : (
                         <>
                           <button
                             type="button"
                             onClick={() => setWorkspaceMode('preview')}
-                            className="btn-primary w-full py-2.5"
+                            className="btn-primary min-h-[44px] w-full py-2.5"
                           >
                             {t.workspace.tabs.viewPreview}
                           </button>
@@ -604,7 +660,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                             type="button"
                             onClick={handleSlice}
                             disabled={slicing || bounds.outOfBounds || !selectedSlotId}
-                            className="btn-secondary w-full py-2"
+                            className="btn-secondary min-h-[44px] w-full py-2"
                           >
                             {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
                             {slicing ? t.workspace.slicingBtn : t.workspace.tabs.reSliceBtn}
@@ -619,13 +675,12 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                             <span>{t.workspace.printerBusyNotice}</span>
                           </div>
                         )}
-
                         {!isSlicedAndFresh || job.status !== 'SLICED' ? (
                           <button
                             type="button"
                             onClick={handleSlice}
                             disabled={slicing || bounds.outOfBounds || !selectedSlotId}
-                            className="btn-primary w-full py-2.5"
+                            className="btn-primary min-h-[44px] w-full py-2.5"
                           >
                             {slicing && <Loader2 className="h-4 w-4 animate-spin" />}
                             {slicing ? t.workspace.slicingBtn : t.workspace.sliceBtn}
@@ -640,7 +695,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                               !previewState.ready
                             }
                             onClick={handleSubmit}
-                            className="btn-primary w-full py-2.5"
+                            className="btn-primary min-h-[44px] w-full py-2.5"
                           >
                             {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
                             {submitting ? t.workspace.submittingBtn : t.workspace.submitBtn}
@@ -655,16 +710,15 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
                               !previewState.ready
                             }
                             onClick={() => setApprovalModalOpen(true)}
-                            className="inline-flex w-full items-center justify-center rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-45"
+                            className="inline-flex min-h-[44px] w-full items-center justify-center rounded-xl bg-amber-500 px-4 py-2.5 text-sm font-medium text-slate-950 transition-colors hover:bg-amber-400 disabled:opacity-45"
                           >
                             {t.workspace.requestApprovalBtn}
                           </button>
                         )}
-
                         <button
                           type="button"
                           onClick={() => setWorkspaceMode('prepare')}
-                          className="btn-secondary w-full py-2"
+                          className="btn-secondary min-h-[44px] w-full py-2"
                         >
                           {t.workspace.tabs.backToPrepare}
                         </button>
@@ -678,8 +732,8 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
         )}
       </aside>
 
-      {/* Full-Bleed Three.js Build Plate Stage */}
-      <div className="relative flex-1 min-h-[520px] lg:min-h-0">
+      {/* Full-Bleed Three.js Build Plate Stage (first on mobile for immediate 3D visibility) */}
+      <div className="relative order-1 h-[46dvh] min-h-[290px] max-h-[420px] w-full shrink-0 sm:h-[50dvh] sm:max-h-[460px] md:order-2 md:h-auto md:max-h-none md:min-h-0 md:flex-1">
         <BuildPlate3D
           jobId={job?.id ?? null}
           meshVersion={meshVersion}

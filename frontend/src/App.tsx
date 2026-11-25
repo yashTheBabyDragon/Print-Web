@@ -19,7 +19,7 @@ function PortalShell() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-[#F6F7F9] dark:bg-[#0D0E11]">
+      <div className="flex min-h-screen min-h-[100dvh] items-center justify-center bg-[#F6F7F9] dark:bg-[#0D0E11]">
         <div className="flex items-center gap-2.5 text-sm font-medium text-[#5B616E] dark:text-[#9399A6]">
           <Loader2 className="h-4 w-4 animate-spin text-[#00A7D9]" />
           <span>{t.common.loading}</span>
@@ -37,16 +37,18 @@ function PortalShell() {
     activeTab === 'admin' && !isStaff ? 'print' : activeTab;
 
   return (
-    <div className="min-h-screen bg-[#F6F7F9] text-[#111318] dark:bg-[#0D0E11] dark:text-[#F4F5F7]">
+    <div className="flex min-h-screen min-h-[100dvh] flex-col bg-[#F6F7F9] text-[#111318] dark:bg-[#0D0E11] dark:text-[#F4F5F7]">
       <Header activeTab={effectiveTab} onSelectTab={setActiveTab} />
-      <main>
+      <main className="flex-1 pb-[env(safe-area-inset-bottom)]">
         {effectiveTab === 'print' && (
           <StudentWorkspace onNavigateMyPrints={() => setActiveTab('my-prints')} />
         )}
         {effectiveTab === 'my-prints' && (
           <MyPrintsPage onGoToPrint={() => setActiveTab('print')} />
         )}
-        {effectiveTab === 'admin' && isStaff && <AdminDashboard />}
+        {effectiveTab === 'admin' && isStaff && (
+          <AdminDashboard onGoToPrint={() => setActiveTab('print')} />
+        )}
       </main>
     </div>
   );
