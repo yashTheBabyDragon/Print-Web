@@ -67,6 +67,14 @@ def _migrate_sqlite_schema(eng) -> None:
                 conn.execute(
                     text("ALTER TABLE users ADD COLUMN notify_webhook_url VARCHAR(500)")
                 )
+            if "permissions_json" not in user_cols:
+                conn.execute(
+                    text("ALTER TABLE users ADD COLUMN permissions_json TEXT")
+                )
+            if "budget_reset_at" not in user_cols:
+                conn.execute(
+                    text("ALTER TABLE users ADD COLUMN budget_reset_at DATETIME")
+                )
 
         job_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(print_jobs)"))}
         if job_cols:
@@ -95,6 +103,15 @@ def _migrate_sqlite_schema(eng) -> None:
                 conn.execute(
                     text("ALTER TABLE printers ADD COLUMN filament_api_printer_id VARCHAR(120)")
                 )
+
+        class_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(teacher_classes)"))}
+        if class_cols:
+            if "description" not in class_cols:
+                conn.execute(text("ALTER TABLE teacher_classes ADD COLUMN description TEXT"))
+            if "default_max_active_grams" not in class_cols:
+                conn.execute(text("ALTER TABLE teacher_classes ADD COLUMN default_max_active_grams FLOAT"))
+            if "default_max_print_minutes" not in class_cols:
+                conn.execute(text("ALTER TABLE teacher_classes ADD COLUMN default_max_print_minutes INTEGER"))
 
 
 def init_db() -> None:

@@ -795,8 +795,11 @@ def test_teacher_management_and_rbac(client: TestClient):
         json={"default_max_active_grams": 200.0},
     ).status_code == 403
 
-    # Teacher CAN access printers & own classes
-    assert client.get("/api/admin/printers", headers=_auth_header(ta_token)).status_code == 200
+    # Teacher CANNOT access /api/admin/printers (403 FORBIDDEN), CAN access own classes & public /api/printers
+    r_admin_printers = client.get("/api/admin/printers", headers=_auth_header(ta_token))
+    assert r_admin_printers.status_code == 403
+    assert r_admin_printers.json()["detail"]["required_permission"] == "printers:manage"
+    assert client.get("/api/printers", headers=_auth_header(ta_token)).status_code == 200
     assert client.get("/api/admin/classes", headers=_auth_header(ta_token)).status_code == 200
 
     # Main Admin creates a new teacher, toggles active, resets password, and deletes

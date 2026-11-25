@@ -3,6 +3,7 @@ import { Bell, LogOut, Menu, Moon, Sun, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { useI18n } from '../i18n';
+import { canAccessStaffPortal } from '../utils/permissions';
 import { Logo } from './Logo';
 import { NotificationSettingsModal } from './NotificationSettingsModal';
 
@@ -52,7 +53,8 @@ export function Header({ activeTab, onSelectTab }: HeaderProps) {
 
   const hasNotificationsEnabled = Boolean(user.notify_browser || user.notify_webhook_url);
 
-  const isStaff = user.role === 'admin' || user.role === 'teacher';
+  const isStaff = canAccessStaffPortal(user);
+  const staffNavLabel = user.role === 'teacher' ? t.nav.teacherPortal : t.nav.admin;
   const used = Number(user.active_grams_used ?? 0);
   const max = Number(user.effective_max_active_grams ?? 100);
   const ratio = max > 0 ? Math.min(1, used / max) : 0;
@@ -144,7 +146,7 @@ export function Header({ activeTab, onSelectTab }: HeaderProps) {
                     : 'text-[#5B616E] hover:text-[#111318] dark:text-[#9399A6] dark:hover:text-[#F4F5F7]'
                 }`}
               >
-                {t.nav.admin}
+                {staffNavLabel}
               </button>
             )}
           </nav>
@@ -334,7 +336,7 @@ export function Header({ activeTab, onSelectTab }: HeaderProps) {
                       : 'text-[#111318] hover:bg-black/[0.04] dark:text-[#F4F5F7] dark:hover:bg-white/[0.06]'
                   }`}
                 >
-                  <span>{t.nav.admin}</span>
+                  <span>{staffNavLabel}</span>
                 </button>
               )}
             </nav>
