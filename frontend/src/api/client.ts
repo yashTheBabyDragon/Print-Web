@@ -145,6 +145,8 @@ export const api = {
       body: JSON.stringify({ da, name, password, teacher_id: teacherId ?? null }),
     }),
   getMe: () => request<UserSummary>('/api/auth/me'),
+  logoutUser: () =>
+    request<{ deleted_drafts?: number } | void>('/api/auth/logout', { method: 'POST' }),
   getNotifications: () => request<NotificationSettings>('/api/auth/notifications'),
   updateNotifications: (data: {
     notify_browser?: boolean;
@@ -182,7 +184,20 @@ export const api = {
   reorientJob: (jobId: number) =>
     request<JobDetail>(`/api/jobs/${jobId}/reorient`, { method: 'POST' }),
   fetchJobMeshBuffer: (jobId: number) => requestBuffer(`/api/jobs/${jobId}/mesh`),
+  fetchJobStlBuffer: (jobId: number) => requestBuffer(`/api/jobs/${jobId}/stl`),
+  fetchJobStl: async (jobId: number, filename?: string): Promise<File> => {
+    const buf = await requestBuffer(`/api/jobs/${jobId}/stl`);
+    return new File([buf], filename || `draft-${jobId}.stl`, { type: 'application/octet-stream' });
+  },
   fetchJobGcodeText: (jobId: number) => requestText(`/api/jobs/${jobId}/gcode`),
+  deleteJobDraft: (jobId: number) =>
+    request<{ deleted?: boolean; job_id?: number } | void>(`/api/jobs/${jobId}`, {
+      method: 'DELETE',
+    }),
+  clearDrafts: () =>
+    request<{ deleted_count?: number } | void>('/api/jobs/drafts', {
+      method: 'DELETE',
+    }),
   sliceJob: (jobId: number, payload: TransformPayload) =>
     request<JobDetail>(`/api/jobs/${jobId}/slice`, {
       method: 'POST',

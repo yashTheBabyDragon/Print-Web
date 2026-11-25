@@ -25,6 +25,7 @@ from app.schemas import (
     WebhookTestResponse,
 )
 from app.services.budget import build_user_summary, get_system_settings
+from app.services.drafts import delete_user_drafts
 from app.services.notifications import (
     build_test_webhook_payload,
     normalize_webhook_url,
@@ -243,6 +244,16 @@ def login(body: LoginRequest, db: Session = Depends(get_db)) -> AuthTokenRespons
         access_token=token,
         user=build_user_summary(db, user),
     )
+
+
+@router.post("/logout")
+def logout(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    """Delete all unsubmitted drafts (DRAFT / SLICED) for the current user on logout."""
+    deleted = delete_user_drafts(db, current_user.id)
+    return {"deleted": deleted}
 
 
 @router.get("/me", response_model=UserSummary)

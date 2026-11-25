@@ -22,8 +22,17 @@ import {
 } from '../components/BuildPlate3D';
 import { PrinterSelector } from '../components/PrinterSelector';
 
+export interface DeletedDraftSignal {
+  target: number | 'all';
+  seq: number;
+}
+
 interface StudentWorkspaceProps {
   onNavigateMyPrints: () => void;
+  isVisible?: boolean;
+  draftToLoad?: JobDetail | null;
+  onDraftLoaded?: () => void;
+  deletedDraftSignal?: DeletedDraftSignal | null;
 }
 
 const IDENTITY_TRANSFORM: MeshTransformState = {
@@ -36,7 +45,13 @@ const IDENTITY_TRANSFORM: MeshTransformState = {
   scale: 1,
 };
 
-export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) {
+export function StudentWorkspace({
+  onNavigateMyPrints,
+  isVisible = true,
+  draftToLoad = null,
+  onDraftLoaded,
+  deletedDraftSignal = null,
+}: StudentWorkspaceProps) {
   const { user, refreshUser } = useAuth();
   const { lang, t } = useI18n();
 
@@ -47,6 +62,8 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
   const [selectedSampleId, setSelectedSampleId] = useState<string>('');
 
   const [job, setJob] = useState<JobDetail | null>(null);
+  const jobRef = useRef<JobDetail | null>(null);
+  jobRef.current = job;
   const [meshVersion, setMeshVersion] = useState(0);
   const [transform, setTransform] = useState<MeshTransformState>(IDENTITY_TRANSFORM);
   const [supportsEnabled, setSupportsEnabled] = useState(true);
@@ -113,6 +130,60 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
     loadPrintersAndSamples();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Load a saved draft selected from My Prints into the active 3D workspace
+  useEffect(() => {
+    if (!draftToLoad) return;
+    setError(null);
+    setSuccessMsg(null);
+    setJob(draftToLoad);
+    if (draftToLoad.printer_id) {
+      setSelectedPrinterId(draftToLoad.printer_id);
+    }
+    if (draftToLoad.slot_id) {
+      setSelectedSlotId(draftToLoad.slot_id);
+    }
+    setSupportsEnabled(draftToLoad.supports_enabled !== false);
+    setTransform({
+      posX: draftToLoad.pos_x_mm ?? 0,
+      posY: draftToLoad.pos_y_mm ?? 0,
+      quatX: draftToLoad.quat_x ?? 0,
+      quatY: draftToLoad.quat_y ?? 0,
+      quatZ: draftToLoad.quat_z ?? 0,
+      quatW: draftToLoad.quat_w ?? 1,
+      scale: draftToLoad.scale ?? 1,
+    });
+    setSliceStale(draftToLoad.status !== 'SLICED');
+    setMobilePrinterOpen(false);
+    setMeshVersion((v) => v + 1);
+    onDraftLoaded?.();
+  }, [draftToLoad, onDraftLoaded]);
+
+  // Reset active workspace if the currently open draft was deleted or cleared from My Prints
+  useEffect(() => {
+    if (!deletedDraftSignal) return;
+    const currentJob = jobRef.current;
+    if (!currentJob) return;
+    const isCurrentDraft =
+      currentJob.status === 'DRAFT' || currentJob.status === 'SLICED';
+    const shouldReset =
+      (deletedDraftSignal.target === 'all' && isCurrentDraft) ||
+      (typeof deletedDraftSignal.target === 'number' &&
+        currentJob.id === deletedDraftSignal.target);
+    if (!shouldReset) return;
+    setJob(null);
+    setTransform(IDENTITY_TRANSFORM);
+    setSupportsEnabled(true);
+    setSliceStale(false);
+    setError(null);
+    setSuccessMsg(null);
+    setBounds({
+      widthMm: 0,
+      depthMm: 0,
+      heightMm: 0,
+      outOfBounds: false,
+    });
+  }, [deletedDraftSignal]);
 
   const activePrinter = useMemo(
     () => printers.find((p) => p.id === selectedPrinterId) ?? printers[0] ?? null,
@@ -737,6 +808,7 @@ export function StudentWorkspace({ onNavigateMyPrints }: StudentWorkspaceProps) 
         <BuildPlate3D
           jobId={job?.id ?? null}
           meshVersion={meshVersion}
+          isVisible={isVisible}
           bedX={activePrinter?.bed_x_mm ?? 250}
           bedY={activePrinter?.bed_y_mm ?? 220}
           bedZ={activePrinter?.bed_z_mm ?? 220}

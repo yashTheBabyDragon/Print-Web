@@ -2,9 +2,11 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  FolderOpen,
   Loader2,
   Plus,
   RefreshCw,
+  Trash2,
   XCircle,
 } from 'lucide-react';
 import { api } from '../api/client';
@@ -17,18 +19,26 @@ import { JobStatusBadge } from '../components/StatusBadge';
 
 interface MyPrintsPageProps {
   onGoToPrint: () => void;
+  onLoadDraft?: (job: JobDetail) => void;
+  onDraftDeleted?: (target: number | 'all') => void;
 }
 
+const DRAFT_STATUSES: JobStatus[] = ['DRAFT', 'SLICED'];
 const CANCELLABLE_STATUSES: JobStatus[] = ['PENDING_APPROVAL', 'QUEUED', 'PRINTING'];
 const DEV_COMPLETABLE_STATUSES: JobStatus[] = ['QUEUED', 'PRINTING'];
 
-export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
+export function MyPrintsPage({
+  onGoToPrint,
+  onLoadDraft,
+  onDraftDeleted,
+}: MyPrintsPageProps) {
   const { user, authMode, setUser } = useAuth();
   const { lang, t } = useI18n();
 
   const [jobs, setJobs] = useState<JobDetail[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyJobId, setBusyJobId] = useState<number | null>(null);
+  const [clearingDrafts, setClearingDrafts] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadMine = useCallback(async () => {
@@ -75,10 +85,39 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
     }
   };
 
+  const handleDeleteDraft = async (jobId: number) => {
+    setBusyJobId(jobId);
+    setError(null);
+    try {
+      await api.deleteJobDraft(jobId);
+      onDraftDeleted?.(jobId);
+      await loadMine();
+    } catch (err) {
+      setError(translateApiError(err, t));
+    } finally {
+      setBusyJobId(null);
+    }
+  };
+
+  const handleClearDrafts = async () => {
+    setClearingDrafts(true);
+    setError(null);
+    try {
+      await api.clearDrafts();
+      onDraftDeleted?.('all');
+      await loadMine();
+    } catch (err) {
+      setError(translateApiError(err, t));
+    } finally {
+      setClearingDrafts(false);
+    }
+  };
+
   const used = user?.active_grams_used ?? 0;
   const max = user?.effective_max_active_grams ?? 100;
   const pct = max > 0 ? Math.min(100, (used / max) * 100) : 0;
   const canDevComplete = Boolean(authMode?.dev_mode || authMode?.fdm_mode === 'mock');
+  const draftCount = jobs.filter((job) => DRAFT_STATUSES.includes(job.status)).length;
 
   return (
     <div className="mx-auto max-w-5xl space-y-5 px-4 py-5 sm:space-y-6 sm:px-6 sm:py-8">
@@ -92,12 +131,35 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
             {t.myPrints.subtitle}
           </p>
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
           <button type="button" onClick={loadMine} className="btn-secondary w-full sm:w-auto">
             <RefreshCw className="h-4 w-4 shrink-0" />
             <span>{t.common.refresh}</span>
           </button>
-          <button type="button" onClick={onGoToPrint} className="btn-primary w-full sm:w-auto">
+          <button
+            type="button"
+            disabled={draftCount === 0 || clearingDrafts}
+            onClick={handleClearDrafts}
+            className="btn-secondary w-full text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 sm:w-auto"
+          >
+            {clearingDrafts ? (
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4 shrink-0" />
+            )}
+            <span>
+              {clearingDrafts
+                ? t.myPrints.clearingDrafts
+                : draftCount > 0
+                  ? `${t.myPrints.clearDraftsBtn} (${draftCount})`
+                  : t.myPrints.clearDraftsBtn}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={onGoToPrint}
+            className="btn-primary col-span-2 w-full sm:col-span-1 sm:w-auto"
+          >
             <Plus className="h-4 w-4 shrink-0" />
             <span>{t.myPrints.goToPrint}</span>
           </button>
@@ -162,7 +224,8 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
       ) : (
         <div className="studio-surface divide-y divide-black/[0.06] overflow-hidden dark:divide-white/[0.07]">
           {jobs.map((job) => {
-            const isBusy = busyJobId === job.id;
+            const isBusy = busyJobId === job.id || clearingDrafts;
+            const isDraft = DRAFT_STATUSES.includes(job.status);
             const canCancel = CANCELLABLE_STATUSES.includes(job.status);
             const canComplete = canDevComplete && DEV_COMPLETABLE_STATUSES.includes(job.status);
 
@@ -222,8 +285,34 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
                   )}
                 </div>
 
-                {(canCancel || canComplete) && (
+                {(isDraft || canCancel || canComplete) && (
                   <div className="flex flex-col gap-2 sm:shrink-0 sm:flex-row sm:flex-wrap sm:items-center">
+                    {isDraft && onLoadDraft && (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => onLoadDraft(job)}
+                        className="btn-secondary w-full px-3 py-2 text-xs text-[#007BA3] dark:text-[#38C6F4] sm:w-auto sm:py-1.5"
+                      >
+                        <FolderOpen className="h-3.5 w-3.5 shrink-0" />
+                        <span>{t.myPrints.loadDraftBtn}</span>
+                      </button>
+                    )}
+                    {isDraft && (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => handleDeleteDraft(job.id)}
+                        className="btn-ghost w-full border border-rose-500/20 px-3 py-2 text-xs text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 sm:w-auto sm:border-transparent sm:py-1.5"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          {busyJobId === job.id
+                            ? t.myPrints.deletingDraft
+                            : t.myPrints.deleteDraftBtn}
+                        </span>
+                      </button>
+                    )}
                     {canComplete && (
                       <button
                         type="button"
@@ -232,7 +321,7 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
                         className="btn-secondary w-full px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400 sm:w-auto sm:py-1.5"
                       >
                         <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                        <span>{isBusy ? t.myPrints.devCompleting : t.myPrints.devCompleteBtn}</span>
+                        <span>{busyJobId === job.id ? t.myPrints.devCompleting : t.myPrints.devCompleteBtn}</span>
                       </button>
                     )}
                     {canCancel && (
@@ -243,7 +332,7 @@ export function MyPrintsPage({ onGoToPrint }: MyPrintsPageProps) {
                         className="btn-ghost w-full border border-rose-500/20 px-3 py-2 text-xs text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 sm:w-auto sm:border-transparent sm:py-1.5"
                       >
                         <XCircle className="h-3.5 w-3.5 shrink-0" />
-                        <span>{isBusy ? t.myPrints.cancelling : t.myPrints.cancelBtn}</span>
+                        <span>{busyJobId === job.id ? t.myPrints.cancelling : t.myPrints.cancelBtn}</span>
                       </button>
                     )}
                   </div>

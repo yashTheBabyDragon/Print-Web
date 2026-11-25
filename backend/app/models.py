@@ -43,6 +43,11 @@ ACTIVE_BUDGET_STATUSES: tuple[str, ...] = (
     JobStatus.PRINTING.value,
 )
 
+DRAFT_STATUSES: tuple[str, ...] = (
+    JobStatus.DRAFT.value,
+    JobStatus.SLICED.value,
+)
+
 
 class PrinterType(str, enum.Enum):
     KLIPPER = "klipper"

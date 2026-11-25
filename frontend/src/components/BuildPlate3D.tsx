@@ -70,6 +70,7 @@ export interface BoundingDimensions {
 interface BuildPlate3DProps {
   jobId: number | null;
   meshVersion: number;
+  isVisible?: boolean;
   bedX: number;
   bedY: number;
   bedZ: number;
@@ -205,6 +206,7 @@ function computeExactWorldBox(
 export function BuildPlate3D({
   jobId,
   meshVersion,
+  isVisible = true,
   bedX,
   bedY,
   bedZ,
@@ -1070,6 +1072,25 @@ export function BuildPlate3D({
   useEffect(() => {
     configureGizmoForTool(activeTool);
   }, [activeTool, configureGizmoForTool]);
+
+  // Trigger a WebGL canvas resize when the workspace tab becomes visible again
+  useEffect(() => {
+    if (!isVisible) return;
+    const rafId = requestAnimationFrame(() => {
+      const container = containerRef.current;
+      const camera = cameraRef.current;
+      const renderer = rendererRef.current;
+      if (!container || !camera || !renderer) return;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (w > 0 && h > 0) {
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+      }
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [isVisible]);
 
   // Sync workspace mode visibility & interaction state
   useEffect(() => {

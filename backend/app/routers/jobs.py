@@ -15,6 +15,7 @@ from app.config import settings
 from app.database import get_db
 from app.models import (
     ClassEnrollment,
+    DRAFT_STATUSES,
     JobStatus,
     PrintJob,
     Printer,
@@ -33,6 +34,11 @@ from app.services.budget import (
     build_user_summary,
     compute_budget_check,
     get_system_settings,
+)
+from app.services.drafts import (
+    delete_job_with_files,
+    delete_user_drafts,
+    purge_expired_drafts,
 )
 from app.services.fdm_monster import FdmMonsterError, get_fdm_adapter
 from app.services.filament_api import sync_printer_filament
@@ -246,6 +252,29 @@ def get_job_oriented_mesh(
             detail={"code": "MESH_NOT_FOUND", "message": "Oriented mesh file not found"},
         )
     return FileResponse(path=mesh_path, media_type="model/stl", filename=f"oriented_{job.original_filename}")
+
+
+@router.get("/{job_id}/stl")
+def get_job_stl(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """Stream the stored STL file for the owner, assigned teacher, or admin."""
+    job = _load_job_for_user(db, job_id, current_user)
+    stl_path = Path(job.oriented_stl_path) if job.oriented_stl_path else None
+    if stl_path is None or not stl_path.exists():
+        stl_path = Path(job.original_stl_path) if job.original_stl_path else None
+    if stl_path is None or not stl_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "STL_NOT_FOUND", "message": "STL file not found"},
+        )
+    return FileResponse(
+        path=stl_path,
+        media_type="application/octet-stream",
+        filename=job.original_filename,
+    )
 
 
 @router.get("/{job_id}/gcode")
@@ -511,6 +540,7 @@ def get_my_jobs(
     db: Session = Depends(get_db),
 ) -> MyJobsResponse:
     """Return the current user's budget summary and jobs ordered newest-first."""
+    purge_expired_drafts(db)
     sys_settings = get_system_settings(db)
     jobs = list(
         db.scalars(
@@ -530,6 +560,43 @@ def get_my_jobs(
         user=build_user_summary(db, current_user, sys_settings),
         jobs=[serialize_job(db, j, sys_settings) for j in jobs],
     )
+
+
+@router.delete("/drafts")
+def clear_my_drafts(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    """Delete all DRAFT and SLICED jobs (+ files) owned by the current user."""
+    deleted = delete_user_drafts(db, current_user.id)
+    return {"deleted": deleted}
+
+
+@router.delete("/{job_id}")
+def delete_my_draft(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, int | bool]:
+    """Delete a single DRAFT or SLICED job (+ files) owned by the current user."""
+    job = db.scalar(
+        select(PrintJob).where(PrintJob.id == job_id, PrintJob.user_id == current_user.id)
+    )
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "JOB_NOT_FOUND", "message": "Print job not found"},
+        )
+    if job.status not in DRAFT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "NOT_A_DRAFT",
+                "message": "Only DRAFT or SLICED jobs can be deleted",
+            },
+        )
+    delete_job_with_files(db, job, commit=True)
+    return {"deleted": True, "id": job_id}
 
 
 @router.post("/{job_id}/cancel", response_model=JobDetail)

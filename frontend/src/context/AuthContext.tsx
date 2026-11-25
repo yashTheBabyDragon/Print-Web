@@ -13,7 +13,7 @@ interface AuthContextValue {
     password: string,
     teacherId?: number | null
   ) => Promise<RegisterResponse>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshUser: () => Promise<UserSummary | null>;
   setUser: (user: UserSummary | null) => void;
 }
@@ -84,10 +84,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return res;
   };
 
-  const logout = () => {
+  const logout = useCallback(async () => {
+    if (getStoredToken()) {
+      try {
+        await api.logoutUser();
+      } catch {
+        // Always complete local logout even if the server request fails
+      }
+    }
     setStoredToken(null);
     setUser(null);
-  };
+  }, []);
 
   return (
     <AuthContext.Provider
