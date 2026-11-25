@@ -228,6 +228,63 @@ export interface Filament {
   process_override_profile_id: number | null;
 }
 
+export interface OrcaFilamentImportItem {
+  filament: Filament;
+  profile: OrcaProfile;
+  action: 'created' | 'updated';
+  filename: string;
+}
+
+export interface OrcaFilamentSkippedItem {
+  filename: string;
+  reason: string;
+}
+
+export interface OrcaFilamentImportResult {
+  imported: OrcaFilamentImportItem[];
+  skipped: OrcaFilamentSkippedItem[];
+  created_count: number;
+  updated_count: number;
+  skipped_count: number;
+}
+
+export interface PrusaProfileImportItem {
+  profile: OrcaProfile;
+  action: 'created' | 'updated';
+  filename: string;
+}
+
+export interface PrusaSlicerImportResult {
+  filaments: OrcaFilamentImportItem[];
+  profiles: PrusaProfileImportItem[];
+  skipped: OrcaFilamentSkippedItem[];
+  filaments_created: number;
+  filaments_updated: number;
+  profiles_created: number;
+  profiles_updated: number;
+  skipped_count: number;
+}
+
+export interface PrusaSlicerPreviewItem {
+  key: string;
+  kind: ProfileKind;
+  name: string;
+  filename: string;
+  already_exists: boolean;
+  material?: string | null;
+  density_g_cm3?: number | null;
+  color_hex?: string | null;
+}
+
+export interface PrusaSlicerPreviewResult {
+  items: PrusaSlicerPreviewItem[];
+  skipped: OrcaFilamentSkippedItem[];
+  filament_count: number;
+  process_count: number;
+  machine_count: number;
+  skipped_count: number;
+}
+
 export interface TestSliceResult {
   ok: boolean;
   estimated_grams: number;

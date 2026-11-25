@@ -20,11 +20,14 @@ import type {
   JobDetail,
   MyJobsResponse,
   NotificationSettings,
+  OrcaFilamentImportResult,
   OrcaProfile,
   PendingAccountRequest,
   PermissionCatalog,
   Printer,
   ProfileKind,
+  PrusaSlicerImportResult,
+  PrusaSlicerPreviewResult,
   RegisterResponse,
   SampleModel,
   StudentAccount,
@@ -269,6 +272,25 @@ export const api = {
     }),
   adminDeleteFilament: (id: number) =>
     request<void>(`/api/admin/filaments/${id}`, { method: 'DELETE' }),
+  adminImportOrcaFilaments: (
+    files: File[],
+    options?: { update_existing?: boolean; default_color_hex?: string }
+  ) => {
+    const form = new FormData();
+    for (const file of files) {
+      form.append('files', file);
+    }
+    if (options?.update_existing !== undefined) {
+      form.append('update_existing', String(options.update_existing));
+    }
+    if (options?.default_color_hex) {
+      form.append('default_color_hex', options.default_color_hex);
+    }
+    return request<OrcaFilamentImportResult>('/api/admin/filaments/import-orca', {
+      method: 'POST',
+      body: form,
+    });
+  },
 
   adminGetProfiles: () => request<OrcaProfile[]>('/api/admin/profiles'),
   adminUploadProfile: (file: File, name: string, kind: ProfileKind, notes: string) => {
@@ -284,6 +306,50 @@ export const api = {
   },
   adminDeleteProfile: (id: number) =>
     request<void>(`/api/admin/profiles/${id}`, { method: 'DELETE' }),
+  adminPreviewPrusaSlicer: (files: File[]) => {
+    const form = new FormData();
+    for (const file of files) {
+      form.append('files', file);
+    }
+    return request<PrusaSlicerPreviewResult>('/api/admin/profiles/preview-prusaslicer', {
+      method: 'POST',
+      body: form,
+    });
+  },
+  adminImportPrusaSlicer: (
+    files: File[],
+    options?: {
+      import_filaments?: boolean;
+      import_processes?: boolean;
+      import_machines?: boolean;
+      update_existing?: boolean;
+      selected_keys?: string[];
+    }
+  ) => {
+    const form = new FormData();
+    for (const file of files) {
+      form.append('files', file);
+    }
+    if (options?.import_filaments !== undefined) {
+      form.append('import_filaments', String(options.import_filaments));
+    }
+    if (options?.import_processes !== undefined) {
+      form.append('import_processes', String(options.import_processes));
+    }
+    if (options?.import_machines !== undefined) {
+      form.append('import_machines', String(options.import_machines));
+    }
+    if (options?.update_existing !== undefined) {
+      form.append('update_existing', String(options.update_existing));
+    }
+    if (options?.selected_keys !== undefined) {
+      form.append('selected_keys', JSON.stringify(options.selected_keys));
+    }
+    return request<PrusaSlicerImportResult>('/api/admin/profiles/import-prusaslicer', {
+      method: 'POST',
+      body: form,
+    });
+  },
   adminTestSlice: (printerId: number, slotId: number) =>
     request<TestSliceResult>('/api/admin/profiles/test-slice', {
       method: 'POST',

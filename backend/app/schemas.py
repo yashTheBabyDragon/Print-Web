@@ -325,6 +325,63 @@ class OrcaProfileOut(BaseModel):
     created_at: datetime
 
 
+class OrcaFilamentImportItem(BaseModel):
+    filament: FilamentOut
+    profile: OrcaProfileOut
+    action: Literal["created", "updated"]
+    filename: str
+
+
+class OrcaFilamentSkippedItem(BaseModel):
+    filename: str
+    reason: str
+
+
+class OrcaFilamentImportResult(BaseModel):
+    imported: list[OrcaFilamentImportItem] = Field(default_factory=list)
+    skipped: list[OrcaFilamentSkippedItem] = Field(default_factory=list)
+    created_count: int = 0
+    updated_count: int = 0
+    skipped_count: int = 0
+
+
+class PrusaProfileImportItem(BaseModel):
+    profile: OrcaProfileOut
+    action: Literal["created", "updated"]
+    filename: str
+
+
+class PrusaSlicerImportResult(BaseModel):
+    filaments: list[OrcaFilamentImportItem] = Field(default_factory=list)
+    profiles: list[PrusaProfileImportItem] = Field(default_factory=list)
+    skipped: list[OrcaFilamentSkippedItem] = Field(default_factory=list)
+    filaments_created: int = 0
+    filaments_updated: int = 0
+    profiles_created: int = 0
+    profiles_updated: int = 0
+    skipped_count: int = 0
+
+
+class PrusaSlicerPreviewItem(BaseModel):
+    key: str
+    kind: Literal["filament", "process", "machine"]
+    name: str
+    filename: str
+    already_exists: bool = False
+    material: Optional[str] = None
+    density_g_cm3: Optional[float] = None
+    color_hex: Optional[str] = None
+
+
+class PrusaSlicerPreviewResult(BaseModel):
+    items: list[PrusaSlicerPreviewItem] = Field(default_factory=list)
+    skipped: list[OrcaFilamentSkippedItem] = Field(default_factory=list)
+    filament_count: int = 0
+    process_count: int = 0
+    machine_count: int = 0
+    skipped_count: int = 0
+
+
 class TestSliceRequest(BaseModel):
     printer_id: int
     slot_id: int

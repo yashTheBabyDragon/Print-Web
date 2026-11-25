@@ -39,6 +39,7 @@ from app.permissions import (
     get_permissions_for_role,
     get_user_permissions,
     has_permission,
+    require_any_permission,
     require_permission,
     resolve_preset,
     validate_permission_keys,
@@ -70,12 +71,19 @@ from app.schemas import (
     FilamentPatch,
     FilamentSyncResponse,
     JobDetail,
+    OrcaFilamentImportItem,
+    OrcaFilamentImportResult,
+    OrcaFilamentSkippedItem,
     OrcaProfileOut,
     PendingAccountOut,
     PermissionCatalogItem,
     PermissionCatalogOut,
     PermissionPresetOut,
     PrinterSlotUpdate,
+    PrusaProfileImportItem,
+    PrusaSlicerImportResult,
+    PrusaSlicerPreviewItem,
+    PrusaSlicerPreviewResult,
     ResetPasswordRequest,
     ResetPasswordResponse,
     StudentClassBadge,
@@ -105,8 +113,14 @@ from app.services.filament_api import (
 )
 from app.services.profiles import (
     delete_profile_file,
+    extract_orca_filament_entries,
+    parse_orca_filament_json,
     save_profile_file,
     test_slice_calibration_cube,
+)
+from app.services.prusaslicer import (
+    extract_prusaslicer_ini_entries,
+    parse_prusaslicer_ini,
 )
 from app.services.serializers import (
     serialize_admin_printer,
@@ -710,6 +724,154 @@ def admin_create_filament(
     return FilamentOut.model_validate(filament)
 
 
+@router.post("/filaments/import-orca", response_model=OrcaFilamentImportResult)
+async def admin_import_orca_filaments(
+    files: list[UploadFile] = File(default=[]),
+    update_existing: bool = Form(default=True),
+    default_color_hex: Optional[str] = Form(default=None),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
+    db: Session = Depends(get_db),
+) -> OrcaFilamentImportResult:
+    """Import one or more OrcaSlicer filament profiles (.json, .orca_filament, or .zip)."""
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "NO_FILES", "message": "At least one filament file is required"},
+        )
+
+    imported: list[OrcaFilamentImportItem] = []
+    skipped: list[OrcaFilamentSkippedItem] = []
+    created_count = 0
+    updated_count = 0
+
+    for upload in files:
+        upload_name = Path(upload.filename or "filament.json").name
+        raw = await upload.read()
+        try:
+            entries = extract_orca_filament_entries(upload_name, raw)
+        except ValueError as exc:
+            skipped.append(OrcaFilamentSkippedItem(filename=upload_name, reason=str(exc)))
+            continue
+
+        for entry_name, entry_bytes in entries:
+            try:
+                parsed = parse_orca_filament_json(
+                    entry_name,
+                    entry_bytes,
+                    default_color_hex=default_color_hex,
+                )
+            except ValueError as exc:
+                skipped.append(OrcaFilamentSkippedItem(filename=entry_name, reason=str(exc)))
+                continue
+
+            existing_filament = db.scalar(
+                select(Filament).where(func.lower(Filament.name) == parsed.name.lower())
+            )
+            if existing_filament is not None and not update_existing:
+                skipped.append(
+                    OrcaFilamentSkippedItem(
+                        filename=entry_name,
+                        reason=f"Filament '{parsed.name}' already exists",
+                    )
+                )
+                continue
+
+            try:
+                stored_path = save_profile_file(
+                    entry_name,
+                    entry_bytes,
+                    kind=ProfileKind.FILAMENT.value,
+                )
+            except ValueError as exc:
+                skipped.append(OrcaFilamentSkippedItem(filename=entry_name, reason=str(exc)))
+                continue
+
+            if existing_filament is not None:
+                profile: Optional[OrcaProfile] = (
+                    db.get(OrcaProfile, existing_filament.filament_profile_id)
+                    if existing_filament.filament_profile_id is not None
+                    else None
+                )
+                if profile is not None:
+                    delete_profile_file(profile)
+                    profile.name = parsed.name
+                    profile.filename = entry_name
+                    profile.file_path = str(stored_path)
+                    profile.notes = parsed.notes
+                else:
+                    profile = OrcaProfile(
+                        name=parsed.name,
+                        kind=ProfileKind.FILAMENT.value,
+                        filename=entry_name,
+                        file_path=str(stored_path),
+                        notes=parsed.notes,
+                    )
+                    db.add(profile)
+                    db.flush()
+
+                existing_filament.name = parsed.name
+                existing_filament.material = parsed.material
+                existing_filament.color_hex = parsed.color_hex
+                existing_filament.density_g_cm3 = parsed.density_g_cm3
+                existing_filament.filament_profile_id = profile.id
+                existing_filament.is_active = True
+                db.flush()
+                db.refresh(profile)
+                db.refresh(existing_filament)
+
+                updated_count += 1
+                imported.append(
+                    OrcaFilamentImportItem(
+                        filament=FilamentOut.model_validate(existing_filament),
+                        profile=OrcaProfileOut.model_validate(profile),
+                        action="updated",
+                        filename=entry_name,
+                    )
+                )
+            else:
+                profile = OrcaProfile(
+                    name=parsed.name,
+                    kind=ProfileKind.FILAMENT.value,
+                    filename=entry_name,
+                    file_path=str(stored_path),
+                    notes=parsed.notes,
+                )
+                db.add(profile)
+                db.flush()
+
+                filament = Filament(
+                    name=parsed.name,
+                    material=parsed.material,
+                    color_hex=parsed.color_hex,
+                    density_g_cm3=parsed.density_g_cm3,
+                    filament_profile_id=profile.id,
+                    is_active=True,
+                )
+                db.add(filament)
+                db.flush()
+                db.refresh(profile)
+                db.refresh(filament)
+
+                created_count += 1
+                imported.append(
+                    OrcaFilamentImportItem(
+                        filament=FilamentOut.model_validate(filament),
+                        profile=OrcaProfileOut.model_validate(profile),
+                        action="created",
+                        filename=entry_name,
+                    )
+                )
+
+    db.commit()
+    return OrcaFilamentImportResult(
+        imported=imported,
+        skipped=skipped,
+        created_count=created_count,
+        updated_count=updated_count,
+        skipped_count=len(skipped),
+    )
+
+
 @router.patch("/filaments/{filament_id}", response_model=FilamentOut)
 def admin_patch_filament(
     filament_id: int,
@@ -821,6 +983,370 @@ def admin_delete_profile(
     delete_profile_file(profile)
     db.delete(profile)
     db.commit()
+
+
+@router.post("/profiles/preview-prusaslicer", response_model=PrusaSlicerPreviewResult)
+async def admin_preview_prusaslicer(
+    files: list[UploadFile] = File(default=[]),
+    caller: User = Depends(require_any_permission(Permission.FILAMENTS_MANAGE, Permission.PROFILES_MANAGE)),
+    db: Session = Depends(get_db),
+) -> PrusaSlicerPreviewResult:
+    """Inspect PrusaSlicer .ini / .zip files and return selectable items without modifying the DB."""
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "NO_FILES", "message": "At least one .ini or .zip file is required"},
+        )
+
+    can_filaments = has_permission(caller, Permission.FILAMENTS_MANAGE)
+    can_profiles = has_permission(caller, Permission.PROFILES_MANAGE)
+
+    existing_filament_names = {
+        name.lower() for name in db.scalars(select(Filament.name))
+    }
+    existing_profile_keys = {
+        (kind, name.lower())
+        for kind, name in db.execute(select(OrcaProfile.kind, OrcaProfile.name)).all()
+    }
+
+    items: list[PrusaSlicerPreviewItem] = []
+    skipped: list[OrcaFilamentSkippedItem] = []
+    seen_keys: set[str] = set()
+    filament_count = 0
+    process_count = 0
+    machine_count = 0
+
+    for upload in files:
+        upload_name = Path(upload.filename or "config.ini").name
+        raw = await upload.read()
+        try:
+            ini_entries = extract_prusaslicer_ini_entries(upload_name, raw)
+        except ValueError as exc:
+            skipped.append(OrcaFilamentSkippedItem(filename=upload_name, reason=str(exc)))
+            continue
+
+        for entry_name, entry_bytes in ini_entries:
+            try:
+                converted_list = parse_prusaslicer_ini(entry_name, entry_bytes)
+            except ValueError as exc:
+                skipped.append(OrcaFilamentSkippedItem(filename=entry_name, reason=str(exc)))
+                continue
+
+            for item in converted_list:
+                if item.kind == "filament" and not can_filaments:
+                    continue
+                if item.kind in ("process", "machine") and not can_profiles:
+                    continue
+
+                item_key = f"{item.kind}::{item.name}"
+                if item_key in seen_keys:
+                    continue
+                seen_keys.add(item_key)
+
+                if item.kind == "filament":
+                    filament_count += 1
+                    already_exists = item.name.lower() in existing_filament_names
+                    items.append(
+                        PrusaSlicerPreviewItem(
+                            key=item_key,
+                            kind="filament",
+                            name=item.name,
+                            filename=entry_name,
+                            already_exists=already_exists,
+                            material=item.material,
+                            density_g_cm3=item.density_g_cm3,
+                            color_hex=item.color_hex,
+                        )
+                    )
+                else:
+                    if item.kind == "process":
+                        process_count += 1
+                    else:
+                        machine_count += 1
+                    already_exists = (item.kind, item.name.lower()) in existing_profile_keys
+                    items.append(
+                        PrusaSlicerPreviewItem(
+                            key=item_key,
+                            kind=item.kind,
+                            name=item.name,
+                            filename=entry_name,
+                            already_exists=already_exists,
+                        )
+                    )
+
+    return PrusaSlicerPreviewResult(
+        items=items,
+        skipped=skipped,
+        filament_count=filament_count,
+        process_count=process_count,
+        machine_count=machine_count,
+        skipped_count=len(skipped),
+    )
+
+
+@router.post("/profiles/import-prusaslicer", response_model=PrusaSlicerImportResult)
+async def admin_import_prusaslicer(
+    files: list[UploadFile] = File(default=[]),
+    import_filaments: bool = Form(default=True),
+    import_processes: bool = Form(default=True),
+    import_machines: bool = Form(default=True),
+    update_existing: bool = Form(default=True),
+    selected_keys: Optional[str] = Form(default=None),
+    caller: User = Depends(require_any_permission(Permission.FILAMENTS_MANAGE, Permission.PROFILES_MANAGE)),
+    db: Session = Depends(get_db),
+) -> PrusaSlicerImportResult:
+    """Import PrusaSlicer .ini config bundles, flat .ini configs, or .zip archives."""
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "NO_FILES", "message": "At least one .ini or .zip file is required"},
+        )
+
+    selected_set: Optional[set[str]] = None
+    if selected_keys is not None:
+        try:
+            parsed_keys = json.loads(selected_keys)
+            if not isinstance(parsed_keys, list) or not all(isinstance(k, str) for k in parsed_keys):
+                raise ValueError("selected_keys must be a JSON array of strings")
+            selected_set = set(parsed_keys)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_SELECTION", "message": f"Invalid selected_keys payload: {exc}"},
+            ) from exc
+
+    can_filaments = has_permission(caller, Permission.FILAMENTS_MANAGE)
+    can_profiles = has_permission(caller, Permission.PROFILES_MANAGE)
+
+    imported_filaments: list[OrcaFilamentImportItem] = []
+    imported_profiles: list[PrusaProfileImportItem] = []
+    skipped: list[OrcaFilamentSkippedItem] = []
+    filaments_created = 0
+    filaments_updated = 0
+    profiles_created = 0
+    profiles_updated = 0
+
+    for upload in files:
+        upload_name = Path(upload.filename or "config.ini").name
+        raw = await upload.read()
+        try:
+            ini_entries = extract_prusaslicer_ini_entries(upload_name, raw)
+        except ValueError as exc:
+            skipped.append(OrcaFilamentSkippedItem(filename=upload_name, reason=str(exc)))
+            continue
+
+        for entry_name, entry_bytes in ini_entries:
+            try:
+                converted_list = parse_prusaslicer_ini(entry_name, entry_bytes)
+            except ValueError as exc:
+                skipped.append(OrcaFilamentSkippedItem(filename=entry_name, reason=str(exc)))
+                continue
+
+            for item in converted_list:
+                item_key = f"{item.kind}::{item.name}"
+                if selected_set is not None and item_key not in selected_set:
+                    continue
+                if item.kind == "filament":
+                    if not import_filaments:
+                        continue
+                    if not can_filaments:
+                        skipped.append(
+                            OrcaFilamentSkippedItem(
+                                filename=f"{entry_name} ({item.name})",
+                                reason="Missing 'filaments:manage' permission",
+                            )
+                        )
+                        continue
+                elif item.kind == "process":
+                    if not import_processes:
+                        continue
+                    if not can_profiles:
+                        skipped.append(
+                            OrcaFilamentSkippedItem(
+                                filename=f"{entry_name} ({item.name})",
+                                reason="Missing 'profiles:manage' permission",
+                            )
+                        )
+                        continue
+                elif item.kind == "machine":
+                    if not import_machines:
+                        continue
+                    if not can_profiles:
+                        skipped.append(
+                            OrcaFilamentSkippedItem(
+                                filename=f"{entry_name} ({item.name})",
+                                reason="Missing 'profiles:manage' permission",
+                            )
+                        )
+                        continue
+
+                json_bytes = json.dumps(item.orca_json, indent=2).encode("utf-8")
+
+                if item.kind == "filament":
+                    existing_filament = db.scalar(
+                        select(Filament).where(func.lower(Filament.name) == item.name.lower())
+                    )
+                    if existing_filament is not None and not update_existing:
+                        skipped.append(
+                            OrcaFilamentSkippedItem(
+                                filename=f"{entry_name} ({item.name})",
+                                reason=f"Filament '{item.name}' already exists",
+                            )
+                        )
+                        continue
+
+                    stored_path = save_profile_file(
+                        item.filename,
+                        json_bytes,
+                        kind=ProfileKind.FILAMENT.value,
+                    )
+
+                    if existing_filament is not None:
+                        profile: Optional[OrcaProfile] = (
+                            db.get(OrcaProfile, existing_filament.filament_profile_id)
+                            if existing_filament.filament_profile_id is not None
+                            else None
+                        )
+                        if profile is not None:
+                            delete_profile_file(profile)
+                            profile.name = item.name
+                            profile.filename = item.filename
+                            profile.file_path = str(stored_path)
+                            profile.notes = item.notes
+                        else:
+                            profile = OrcaProfile(
+                                name=item.name,
+                                kind=ProfileKind.FILAMENT.value,
+                                filename=item.filename,
+                                file_path=str(stored_path),
+                                notes=item.notes,
+                            )
+                            db.add(profile)
+                            db.flush()
+
+                        existing_filament.name = item.name
+                        existing_filament.material = item.material
+                        existing_filament.color_hex = item.color_hex
+                        existing_filament.density_g_cm3 = item.density_g_cm3
+                        existing_filament.filament_profile_id = profile.id
+                        existing_filament.is_active = True
+                        db.flush()
+                        db.refresh(profile)
+                        db.refresh(existing_filament)
+
+                        filaments_updated += 1
+                        imported_filaments.append(
+                            OrcaFilamentImportItem(
+                                filament=FilamentOut.model_validate(existing_filament),
+                                profile=OrcaProfileOut.model_validate(profile),
+                                action="updated",
+                                filename=entry_name,
+                            )
+                        )
+                    else:
+                        profile = OrcaProfile(
+                            name=item.name,
+                            kind=ProfileKind.FILAMENT.value,
+                            filename=item.filename,
+                            file_path=str(stored_path),
+                            notes=item.notes,
+                        )
+                        db.add(profile)
+                        db.flush()
+
+                        filament = Filament(
+                            name=item.name,
+                            material=item.material,
+                            color_hex=item.color_hex,
+                            density_g_cm3=item.density_g_cm3,
+                            filament_profile_id=profile.id,
+                            is_active=True,
+                        )
+                        db.add(filament)
+                        db.flush()
+                        db.refresh(profile)
+                        db.refresh(filament)
+
+                        filaments_created += 1
+                        imported_filaments.append(
+                            OrcaFilamentImportItem(
+                                filament=FilamentOut.model_validate(filament),
+                                profile=OrcaProfileOut.model_validate(profile),
+                                action="created",
+                                filename=entry_name,
+                            )
+                        )
+                else:
+                    existing_profile = db.scalar(
+                        select(OrcaProfile).where(
+                            OrcaProfile.kind == item.kind,
+                            func.lower(OrcaProfile.name) == item.name.lower(),
+                        )
+                    )
+                    if existing_profile is not None and not update_existing:
+                        skipped.append(
+                            OrcaFilamentSkippedItem(
+                                filename=f"{entry_name} ({item.name})",
+                                reason=f"Profile '{item.name}' ({item.kind}) already exists",
+                            )
+                        )
+                        continue
+
+                    stored_path = save_profile_file(
+                        item.filename,
+                        json_bytes,
+                        kind=item.kind,
+                    )
+
+                    if existing_profile is not None:
+                        delete_profile_file(existing_profile)
+                        existing_profile.name = item.name
+                        existing_profile.filename = item.filename
+                        existing_profile.file_path = str(stored_path)
+                        existing_profile.notes = item.notes
+                        db.flush()
+                        db.refresh(existing_profile)
+
+                        profiles_updated += 1
+                        imported_profiles.append(
+                            PrusaProfileImportItem(
+                                profile=OrcaProfileOut.model_validate(existing_profile),
+                                action="updated",
+                                filename=entry_name,
+                            )
+                        )
+                    else:
+                        profile = OrcaProfile(
+                            name=item.name,
+                            kind=item.kind,
+                            filename=item.filename,
+                            file_path=str(stored_path),
+                            notes=item.notes,
+                        )
+                        db.add(profile)
+                        db.flush()
+                        db.refresh(profile)
+
+                        profiles_created += 1
+                        imported_profiles.append(
+                            PrusaProfileImportItem(
+                                profile=OrcaProfileOut.model_validate(profile),
+                                action="created",
+                                filename=entry_name,
+                            )
+                        )
+
+    db.commit()
+    return PrusaSlicerImportResult(
+        filaments=imported_filaments,
+        profiles=imported_profiles,
+        skipped=skipped,
+        filaments_created=filaments_created,
+        filaments_updated=filaments_updated,
+        profiles_created=profiles_created,
+        profiles_updated=profiles_updated,
+        skipped_count=len(skipped),
+    )
 
 
 @router.post("/profiles/test-slice", response_model=TestSliceResponse)

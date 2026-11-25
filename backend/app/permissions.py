@@ -166,3 +166,22 @@ def require_permission(permission: Permission) -> Callable[..., User]:
         return current_user
 
     return _dependency
+
+
+def require_any_permission(*permissions: Permission) -> Callable[..., User]:
+    """FastAPI dependency enforcing that the authenticated user has at least one of `permissions`."""
+
+    def _dependency(current_user: User = Depends(get_current_user)) -> User:
+        if not any(has_permission(current_user, perm) for perm in permissions):
+            names = ", ".join(p.value for p in permissions)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": f"One of permissions [{names}] is required for this action.",
+                    "required_permission": permissions[0].value if permissions else "",
+                },
+            )
+        return current_user
+
+    return _dependency
