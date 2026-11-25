@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import secrets
 import string
 from collections.abc import Iterable
@@ -14,7 +15,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.auth import hash_password, require_staff, require_super_admin
+from app.auth import hash_password
 from app.database import get_db
 from app.models import (
     ClassEnrollment,
@@ -31,6 +32,17 @@ from app.models import (
     User,
     utcnow,
 )
+from app.permissions import (
+    PERMISSION_CATALOG,
+    PERMISSION_PRESETS,
+    Permission,
+    get_permissions_for_role,
+    get_user_permissions,
+    has_permission,
+    require_permission,
+    resolve_preset,
+    validate_permission_keys,
+)
 from app.schemas import (
     AccountDecisionRequest,
     AdminPrinterOut,
@@ -42,6 +54,10 @@ from app.schemas import (
     AdminTeacherPatch,
     ApprovalDecisionRequest,
     ApprovalsResponse,
+    BudgetRefreshRequest,
+    BudgetRefreshResult,
+    BulkEnrollRequest,
+    BulkEnrollResult,
     ClassCsvResult,
     ClassDeleteOut,
     ClassEnrollmentOut,
@@ -56,6 +72,9 @@ from app.schemas import (
     JobDetail,
     OrcaProfileOut,
     PendingAccountOut,
+    PermissionCatalogItem,
+    PermissionCatalogOut,
+    PermissionPresetOut,
     PrinterSlotUpdate,
     ResetPasswordRequest,
     ResetPasswordResponse,
@@ -64,8 +83,11 @@ from app.schemas import (
     SystemSettingsPatch,
     TeacherClassCreate,
     TeacherClassOut,
+    TeacherClassPatch,
     TestSliceRequest,
     TestSliceResponse,
+    TransferStudentOut,
+    TransferStudentRequest,
     WhitelistCsvResult,
     WhitelistEntryCreate,
     WhitelistEntryOut,
@@ -223,6 +245,8 @@ def _serialize_teacher(db: Session, teacher: User) -> AdminTeacherOut:
         da=teacher.da,
         name=teacher.name,
         is_active=teacher.is_active,
+        permissions=get_user_permissions(teacher),
+        has_custom_permissions=teacher.permissions_json is not None,
         class_count=class_count,
         student_count=student_count,
         pending_print_approvals=pending_print_approvals,
@@ -240,28 +264,51 @@ def _serialize_teacher_class(db: Session, tc: TeacherClass) -> TeacherClassOut:
             u.da: u
             for u in db.scalars(select(User).where(User.da.in_(das), User.role == "student"))
         }
-    out_enrollments = [
-        ClassEnrollmentOut(
-            id=e.id,
-            class_id=e.class_id,
-            da=e.da,
-            suggested_name=e.suggested_name,
-            max_active_grams_override=e.max_active_grams_override,
-            max_print_minutes_override=e.max_print_minutes_override,
-            is_registered=e.da in users_by_da,
-            is_active=users_by_da[e.da].is_active if e.da in users_by_da else None,
-            created_at=e.created_at,
+    sys_settings = get_system_settings(db) if users_by_da else None
+    out_enrollments: list[ClassEnrollmentOut] = []
+    registered_count = 0
+    for e in enrollments:
+        stu = users_by_da.get(e.da)
+        eff_g: Optional[float] = None
+        used_g: Optional[float] = None
+        eff_m: Optional[int] = None
+        if stu is not None and sys_settings is not None:
+            registered_count += 1
+            eff_g, eff_m = get_effective_limits(stu, sys_settings)
+            used_g = get_active_grams_used(db, stu.id)
+        out_enrollments.append(
+            ClassEnrollmentOut(
+                id=e.id,
+                class_id=e.class_id,
+                da=e.da,
+                suggested_name=e.suggested_name,
+                max_active_grams_override=e.max_active_grams_override,
+                max_print_minutes_override=e.max_print_minutes_override,
+                is_registered=stu is not None,
+                is_active=stu.is_active if stu is not None else None,
+                user_id=stu.id if stu is not None else None,
+                registered_name=stu.name if stu is not None else None,
+                effective_max_active_grams=eff_g,
+                active_grams_used=used_g,
+                effective_max_print_minutes=eff_m,
+                created_at=e.created_at,
+            )
         )
-        for e in enrollments
-    ]
+    enrolled_count = len(out_enrollments)
     return TeacherClassOut(
         id=tc.id,
         teacher_id=tc.teacher_id,
         teacher_name=tc.teacher.name if tc.teacher else "",
         name=tc.name,
         code=tc.code,
+        description=tc.description,
+        default_max_active_grams=tc.default_max_active_grams,
+        default_max_print_minutes=tc.default_max_print_minutes,
         is_default_individual=tc.is_default_individual,
-        student_count=len(out_enrollments),
+        student_count=enrolled_count,
+        enrolled_count=enrolled_count,
+        registered_count=registered_count,
+        unclaimed_count=enrolled_count - registered_count,
         enrollments=out_enrollments,
         created_at=tc.created_at,
     )
@@ -358,12 +405,12 @@ def _ensure_teacher_owns_student(db: Session, teacher_id: int, student_da: str) 
 
 
 # ---------------------------------------------------------------------------
-# Printers & MMU Slots
+# Printers & MMU Slots (Admin Only)
 # ---------------------------------------------------------------------------
 
 @router.get("/printers", response_model=list[AdminPrinterOut])
 async def admin_list_printers(
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> list[AdminPrinterOut]:
     sys_settings = get_system_settings(db)
@@ -390,7 +437,7 @@ async def admin_list_printers(
 
 @router.post("/printers/sync", response_model=list[AdminPrinterOut])
 async def admin_sync_printers(
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> list[AdminPrinterOut]:
     sys_settings = get_system_settings(db)
@@ -481,7 +528,7 @@ async def admin_sync_printers(
 @router.delete("/printers/{printer_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_printer(
     printer_id: int,
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> None:
     printer = db.get(Printer, printer_id)
@@ -524,7 +571,7 @@ def admin_delete_printer(
 def admin_patch_printer(
     printer_id: int,
     body: AdminPrinterPatch,
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> AdminPrinterOut:
     printer = db.scalar(
@@ -589,7 +636,7 @@ def admin_update_printer_slot(
     printer_id: int,
     slot_index: int,
     body: PrinterSlotUpdate,
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> AdminPrinterOut:
     printer = db.get(Printer, printer_id)
@@ -630,12 +677,12 @@ def admin_update_printer_slot(
 
 
 # ---------------------------------------------------------------------------
-# Filaments & OrcaSlicer Profiles
+# Filaments & OrcaSlicer Profiles (Admin Only)
 # ---------------------------------------------------------------------------
 
 @router.get("/filaments", response_model=list[FilamentOut])
 def admin_list_filaments(
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> list[FilamentOut]:
     filaments = list(db.scalars(select(Filament).order_by(Filament.id.asc())))
@@ -645,7 +692,7 @@ def admin_list_filaments(
 @router.post("/filaments", response_model=FilamentOut, status_code=status.HTTP_201_CREATED)
 def admin_create_filament(
     body: FilamentCreate,
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> FilamentOut:
     filament = Filament(
@@ -667,7 +714,7 @@ def admin_create_filament(
 def admin_patch_filament(
     filament_id: int,
     body: FilamentPatch,
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> FilamentOut:
     filament = db.get(Filament, filament_id)
@@ -698,7 +745,7 @@ def admin_patch_filament(
 @router.delete("/filaments/{filament_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_filament(
     filament_id: int,
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.FILAMENTS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> None:
     filament = db.get(Filament, filament_id)
@@ -710,7 +757,7 @@ def admin_delete_filament(
 
 @router.get("/profiles", response_model=list[OrcaProfileOut])
 def admin_list_profiles(
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PROFILES_MANAGE)),
     db: Session = Depends(get_db),
 ) -> list[OrcaProfileOut]:
     profiles = list(db.scalars(select(OrcaProfile).order_by(OrcaProfile.kind.asc(), OrcaProfile.id.asc())))
@@ -723,7 +770,7 @@ async def admin_upload_profile(
     name: str = Form(...),
     kind: str = Form(...),
     notes: Optional[str] = Form(default=None),
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PROFILES_MANAGE)),
     db: Session = Depends(get_db),
 ) -> OrcaProfileOut:
     valid_kinds = {k.value for k in ProfileKind}
@@ -765,7 +812,7 @@ async def admin_upload_profile(
 @router.delete("/profiles/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_profile(
     profile_id: int,
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PROFILES_MANAGE)),
     db: Session = Depends(get_db),
 ) -> None:
     profile = db.get(OrcaProfile, profile_id)
@@ -779,7 +826,7 @@ def admin_delete_profile(
 @router.post("/profiles/test-slice", response_model=TestSliceResponse)
 def admin_test_slice_profile(
     body: TestSliceRequest,
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PROFILES_MANAGE)),
     db: Session = Depends(get_db),
 ) -> TestSliceResponse:
     sys_settings = get_system_settings(db)
@@ -809,12 +856,63 @@ def admin_test_slice_profile(
 
 
 # ---------------------------------------------------------------------------
-# Teachers (Super-Admin Only)
+# Permissions Catalog & Teachers (Admin Only)
 # ---------------------------------------------------------------------------
+
+def _resolve_custom_permissions_json(
+    *,
+    permissions: Optional[list[str]],
+    preset: Optional[str],
+    reset_permissions: bool = False,
+) -> tuple[bool, Optional[str]]:
+    """Return (should_update, permissions_json_value) after validating preset or manual list."""
+    if reset_permissions:
+        return True, None
+    if preset is not None:
+        try:
+            resolved = resolve_preset(preset)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_PRESET", "message": str(exc)},
+            ) from exc
+        return True, json.dumps(resolved)
+    if permissions is not None:
+        try:
+            validated = validate_permission_keys(permissions)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_PERMISSION", "message": str(exc)},
+            ) from exc
+        return True, json.dumps(validated)
+    return False, None
+
+
+@router.get("/permissions/catalog", response_model=PermissionCatalogOut)
+def admin_get_permissions_catalog(
+    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
+) -> PermissionCatalogOut:
+    """Return all available permissions, quick presets, and default role permissions."""
+    return PermissionCatalogOut(
+        permissions=[
+            PermissionCatalogItem(key=perm.value, group=group)
+            for perm, group in PERMISSION_CATALOG
+        ],
+        presets=[
+            PermissionPresetOut(id=preset_id, permissions=sorted(perms))
+            for preset_id, perms in PERMISSION_PRESETS.items()
+        ],
+        role_defaults={
+            role: get_permissions_for_role(role)
+            for role in ("student", "teacher", "admin")
+        },
+    )
+
 
 @router.get("/teachers", response_model=list[AdminTeacherOut])
 def admin_list_teachers(
-    _super_admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> list[AdminTeacherOut]:
     teachers = list(
@@ -826,7 +924,7 @@ def admin_list_teachers(
 @router.post("/teachers", response_model=AdminTeacherOut, status_code=status.HTTP_201_CREATED)
 def admin_create_teacher(
     body: AdminTeacherCreate,
-    _super_admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> AdminTeacherOut:
     existing = db.scalar(select(User).where(User.da == body.identifier))
@@ -838,6 +936,10 @@ def admin_create_teacher(
                 "message": "Un compte existe déjà avec cet identifiant.",
             },
         )
+    should_set_perms, perms_json = _resolve_custom_permissions_json(
+        permissions=body.permissions,
+        preset=body.preset,
+    )
     teacher = User(
         da=body.identifier,
         name=body.name.strip(),
@@ -845,6 +947,7 @@ def admin_create_teacher(
         role="teacher",
         approval_status="approved",
         is_active=True,
+        permissions_json=perms_json if should_set_perms else None,
     )
     db.add(teacher)
     db.commit()
@@ -856,7 +959,7 @@ def admin_create_teacher(
 def admin_patch_teacher(
     teacher_id: int,
     body: AdminTeacherPatch,
-    _super_admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> AdminTeacherOut:
     teacher = db.get(User, teacher_id)
@@ -869,6 +972,14 @@ def admin_patch_teacher(
     if "is_active" in fields and body.is_active is not None:
         teacher.is_active = body.is_active
 
+    should_set_perms, perms_json = _resolve_custom_permissions_json(
+        permissions=body.permissions if "permissions" in fields else None,
+        preset=body.preset if "preset" in fields else None,
+        reset_permissions=body.reset_permissions,
+    )
+    if should_set_perms:
+        teacher.permissions_json = perms_json
+
     db.commit()
     db.refresh(teacher)
     return _serialize_teacher(db, teacher)
@@ -878,7 +989,7 @@ def admin_patch_teacher(
 def admin_reset_teacher_password(
     teacher_id: int,
     body: Optional[ResetPasswordRequest] = None,
-    _super_admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> ResetPasswordResponse:
     teacher = db.get(User, teacher_id)
@@ -899,7 +1010,7 @@ def admin_reset_teacher_password(
 @router.delete("/teachers/{teacher_id}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_teacher(
     teacher_id: int,
-    _super_admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_permission(Permission.TEACHERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> None:
     teacher = db.scalar(
@@ -945,9 +1056,57 @@ def admin_delete_teacher(
 # Teacher Classes & Rosters
 # ---------------------------------------------------------------------------
 
+def _assert_class_access(staff_user: User, tc: TeacherClass) -> None:
+    if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL) and tc.teacher_id != staff_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "FORBIDDEN",
+                "message": "You do not own this class",
+                "required_permission": Permission.CLASSES_MANAGE_ALL.value,
+            },
+        )
+
+
+def _parse_bulk_student_line(line: str) -> tuple[str, Optional[str], Optional[float], Optional[int]] | None:
+    """Parse a pasted line into (da, suggested_name, max_grams, max_minutes) or None if invalid."""
+    raw = line.strip()
+    if not raw:
+        return None
+    if "," in raw or ";" in raw or "\t" in raw:
+        delim = "\t" if "\t" in raw else (";" if ";" in raw else ",")
+        parts = [p.strip() for p in raw.split(delim)]
+    else:
+        tokens = raw.split(None, 1)
+        parts = [t.strip() for t in tokens]
+
+    da = parts[0] if parts else ""
+    if not (len(da) == 7 and da.isdigit()):
+        return None
+
+    suggested_name = parts[1] if len(parts) > 1 and parts[1] else None
+    max_grams: Optional[float] = None
+    max_mins: Optional[int] = None
+    try:
+        if len(parts) > 2 and parts[2]:
+            val_g = float(parts[2])
+            if not (0.0 < val_g <= 5000.0):
+                return None
+            max_grams = val_g
+        if len(parts) > 3 and parts[3]:
+            val_m = int(parts[3])
+            if not (0 < val_m <= 10080):
+                return None
+            max_mins = val_m
+    except ValueError:
+        return None
+
+    return da, suggested_name, max_grams, max_mins
+
+
 @router.get("/classes", response_model=list[TeacherClassOut])
 def admin_list_classes(
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> list[TeacherClassOut]:
     stmt = (
@@ -955,7 +1114,7 @@ def admin_list_classes(
         .options(selectinload(TeacherClass.teacher), selectinload(TeacherClass.enrollments))
         .order_by(TeacherClass.teacher_id.asc(), TeacherClass.created_at.asc(), TeacherClass.id.asc())
     )
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL):
         stmt = stmt.where(TeacherClass.teacher_id == staff_user.id)
     classes = list(db.scalars(stmt))
     return [_serialize_teacher_class(db, tc) for tc in classes]
@@ -964,14 +1123,18 @@ def admin_list_classes(
 @router.post("/classes", response_model=TeacherClassOut, status_code=status.HTTP_201_CREATED)
 def admin_create_class(
     body: TeacherClassCreate,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> TeacherClassOut:
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL):
         if body.teacher_id is not None and body.teacher_id != staff_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail={"code": "FORBIDDEN", "message": "Teachers can only create classes for themselves"},
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Teachers can only create classes for themselves",
+                    "required_permission": Permission.CLASSES_MANAGE_ALL.value,
+                },
             )
         target_teacher_id = staff_user.id
     else:
@@ -1013,6 +1176,9 @@ def admin_create_class(
         teacher_id=target_teacher_id,
         name=body.name,
         code=body.code,
+        description=body.description,
+        default_max_active_grams=body.default_max_active_grams,
+        default_max_print_minutes=body.default_max_print_minutes,
         is_default_individual=False,
     )
     db.add(tc)
@@ -1026,10 +1192,76 @@ def admin_create_class(
     return _serialize_teacher_class(db, created)  # type: ignore[arg-type]
 
 
+@router.patch("/classes/{class_id}", response_model=TeacherClassOut)
+def admin_patch_class(
+    class_id: int,
+    body: TeacherClassPatch,
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
+    db: Session = Depends(get_db),
+) -> TeacherClassOut:
+    tc = db.scalar(
+        select(TeacherClass)
+        .where(TeacherClass.id == class_id)
+        .options(selectinload(TeacherClass.teacher), selectinload(TeacherClass.enrollments))
+    )
+    if tc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
+    _assert_class_access(staff_user, tc)
+
+    fields = body.model_fields_set
+    if "name" in fields and body.name is not None and body.name != tc.name:
+        dup = db.scalar(
+            select(TeacherClass.id).where(
+                TeacherClass.teacher_id == tc.teacher_id,
+                TeacherClass.name == body.name,
+                TeacherClass.id != tc.id,
+            )
+        )
+        if dup is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "CLASS_ALREADY_EXISTS", "message": "A class with this name already exists for this teacher"},
+            )
+        tc.name = body.name
+    if "code" in fields:
+        tc.code = body.code
+    if "description" in fields:
+        tc.description = body.description
+    if "default_max_active_grams" in fields:
+        tc.default_max_active_grams = body.default_max_active_grams
+    if "default_max_print_minutes" in fields:
+        tc.default_max_print_minutes = body.default_max_print_minutes
+
+    if body.apply_budget_to_students:
+        enrolled_das = [e.da for e in tc.enrollments]
+        for enrollment in tc.enrollments:
+            if "default_max_active_grams" in fields or tc.default_max_active_grams is not None:
+                enrollment.max_active_grams_override = tc.default_max_active_grams
+            if "default_max_print_minutes" in fields or tc.default_max_print_minutes is not None:
+                enrollment.max_print_minutes_override = tc.default_max_print_minutes
+        if enrolled_das:
+            students = list(
+                db.scalars(select(User).where(User.da.in_(enrolled_das), User.role == "student"))
+            )
+            for stu in students:
+                if "default_max_active_grams" in fields or tc.default_max_active_grams is not None:
+                    stu.max_active_grams_override = tc.default_max_active_grams
+                if "default_max_print_minutes" in fields or tc.default_max_print_minutes is not None:
+                    stu.max_print_minutes_override = tc.default_max_print_minutes
+
+    db.commit()
+    refreshed = db.scalar(
+        select(TeacherClass)
+        .where(TeacherClass.id == tc.id)
+        .options(selectinload(TeacherClass.teacher), selectinload(TeacherClass.enrollments))
+    )
+    return _serialize_teacher_class(db, refreshed)  # type: ignore[arg-type]
+
+
 @router.delete("/classes/{class_id}", response_model=ClassDeleteOut)
 def admin_delete_class(
     class_id: int,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> ClassDeleteOut:
     tc = db.scalar(
@@ -1039,11 +1271,7 @@ def admin_delete_class(
     )
     if tc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
-    if staff_user.role != "admin" and tc.teacher_id != staff_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "FORBIDDEN", "message": "You do not own this class"},
-        )
+    _assert_class_access(staff_user, tc)
 
     candidate_das = [e.da for e in tc.enrollments]
     deleted_id = tc.id
@@ -1058,17 +1286,13 @@ def admin_delete_class(
 def admin_add_class_student(
     class_id: int,
     body: WhitelistEntryCreate,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> ClassEnrollmentOut:
     tc = db.get(TeacherClass, class_id)
     if tc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
-    if staff_user.role != "admin" and tc.teacher_id != staff_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "FORBIDDEN", "message": "You do not own this class"},
-        )
+    _assert_class_access(staff_user, tc)
 
     existing = db.scalar(
         select(ClassEnrollment).where(ClassEnrollment.class_id == tc.id, ClassEnrollment.da == body.da)
@@ -1079,12 +1303,23 @@ def admin_add_class_student(
             detail={"code": "DA_ALREADY_IN_CLASS", "message": f"DA {body.da} is already in this class"},
         )
 
+    eff_grams_override = (
+        body.max_active_grams_override
+        if body.max_active_grams_override is not None
+        else tc.default_max_active_grams
+    )
+    eff_mins_override = (
+        body.max_print_minutes_override
+        if body.max_print_minutes_override is not None
+        else tc.default_max_print_minutes
+    )
+
     enrollment = ClassEnrollment(
         class_id=tc.id,
         da=body.da,
         suggested_name=body.suggested_name.strip() if body.suggested_name else None,
-        max_active_grams_override=body.max_active_grams_override,
-        max_print_minutes_override=body.max_print_minutes_override,
+        max_active_grams_override=eff_grams_override,
+        max_print_minutes_override=eff_mins_override,
     )
     db.add(enrollment)
     _reactivate_enrolled_student(db, body.da)
@@ -1092,6 +1327,13 @@ def admin_add_class_student(
     db.refresh(enrollment)
 
     stu = db.scalar(select(User).where(User.da == enrollment.da, User.role == "student"))
+    eff_g: Optional[float] = None
+    used_g: Optional[float] = None
+    eff_m: Optional[int] = None
+    if stu is not None:
+        sys_settings = get_system_settings(db)
+        eff_g, eff_m = get_effective_limits(stu, sys_settings)
+        used_g = get_active_grams_used(db, stu.id)
     return ClassEnrollmentOut(
         id=enrollment.id,
         class_id=enrollment.class_id,
@@ -1101,7 +1343,91 @@ def admin_add_class_student(
         max_print_minutes_override=enrollment.max_print_minutes_override,
         is_registered=stu is not None,
         is_active=stu.is_active if stu is not None else None,
+        user_id=stu.id if stu is not None else None,
+        registered_name=stu.name if stu is not None else None,
+        effective_max_active_grams=eff_g,
+        active_grams_used=used_g,
+        effective_max_print_minutes=eff_m,
         created_at=enrollment.created_at,
+    )
+
+
+@router.post("/classes/{class_id}/students/bulk", response_model=BulkEnrollResult)
+def admin_bulk_add_class_students(
+    class_id: int,
+    body: BulkEnrollRequest,
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
+    db: Session = Depends(get_db),
+) -> BulkEnrollResult:
+    """Bulk-add students to a class from pasted text lines or structured entries."""
+    tc = db.get(TeacherClass, class_id)
+    if tc is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
+    _assert_class_access(staff_user, tc)
+
+    existing_das = set(
+        db.scalars(select(ClassEnrollment.da).where(ClassEnrollment.class_id == tc.id))
+    )
+
+    added = 0
+    skipped = 0
+    invalid = 0
+    reactivated = 0
+    invalid_lines: list[str] = []
+
+    parsed_rows: list[tuple[str, Optional[str], Optional[float], Optional[int]]] = []
+    if body.entries:
+        for item in body.entries:
+            parsed_rows.append(
+                (
+                    item.da,
+                    item.suggested_name.strip() if item.suggested_name else None,
+                    item.max_active_grams_override,
+                    item.max_print_minutes_override,
+                )
+            )
+    if body.raw_text:
+        for idx, raw_line in enumerate(body.raw_text.splitlines()):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if idx == 0 and stripped.lower().startswith("da"):
+                first_tok = stripped.split(",")[0].split(";")[0].split("\t")[0].strip().lower()
+                if first_tok == "da":
+                    continue
+            parsed = _parse_bulk_student_line(stripped)
+            if parsed is None:
+                invalid += 1
+                if len(invalid_lines) < 25:
+                    invalid_lines.append(stripped)
+                continue
+            parsed_rows.append(parsed)
+
+    for da, suggested_name, max_grams, max_mins in parsed_rows:
+        if da in existing_das:
+            skipped += 1
+            continue
+        db.add(
+            ClassEnrollment(
+                class_id=tc.id,
+                da=da,
+                suggested_name=suggested_name,
+                max_active_grams_override=max_grams if max_grams is not None else tc.default_max_active_grams,
+                max_print_minutes_override=max_mins if max_mins is not None else tc.default_max_print_minutes,
+            )
+        )
+        existing_das.add(da)
+        added += 1
+        if _reactivate_enrolled_student(db, da):
+            reactivated += 1
+
+    db.commit()
+    return BulkEnrollResult(
+        added=added,
+        skipped=skipped,
+        invalid=invalid,
+        reactivated=reactivated,
+        invalid_lines=invalid_lines,
     )
 
 
@@ -1109,17 +1435,13 @@ def admin_add_class_student(
 async def admin_import_class_csv(
     class_id: int,
     file: UploadFile = File(...),
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> ClassCsvResult:
     tc = db.get(TeacherClass, class_id)
     if tc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
-    if staff_user.role != "admin" and tc.teacher_id != staff_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "FORBIDDEN", "message": "You do not own this class"},
-        )
+    _assert_class_access(staff_user, tc)
 
     raw = await file.read()
     text = raw.decode("utf-8-sig", errors="replace")
@@ -1159,8 +1481,8 @@ async def admin_import_class_csv(
                 class_id=tc.id,
                 da=first,
                 suggested_name=suggested_name,
-                max_active_grams_override=max_grams,
-                max_print_minutes_override=max_mins,
+                max_active_grams_override=max_grams if max_grams is not None else tc.default_max_active_grams,
+                max_print_minutes_override=max_mins if max_mins is not None else tc.default_max_print_minutes,
             )
         )
         existing_das.add(first)
@@ -1172,21 +1494,81 @@ async def admin_import_class_csv(
     return ClassCsvResult(added=added, skipped=skipped, reactivated=reactivated)
 
 
+@router.post("/classes/{class_id}/transfer", response_model=TransferStudentOut)
+def admin_transfer_class_student(
+    class_id: int,
+    body: TransferStudentRequest,
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
+    db: Session = Depends(get_db),
+) -> TransferStudentOut:
+    """Move (or copy) a student enrollment from one class to another owned class."""
+    source_cls = db.get(TeacherClass, class_id)
+    if source_cls is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source class not found")
+    _assert_class_access(staff_user, source_cls)
+
+    target_cls = db.get(TeacherClass, body.target_class_id)
+    if target_cls is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target class not found")
+    _assert_class_access(staff_user, target_cls)
+
+    if source_cls.id == target_cls.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "SAME_CLASS", "message": "Source and target classes must be different"},
+        )
+
+    source_enrollment = db.scalar(
+        select(ClassEnrollment).where(
+            ClassEnrollment.class_id == source_cls.id,
+            ClassEnrollment.da == body.da,
+        )
+    )
+    if source_enrollment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student enrollment not found in source class")
+
+    existing_target = db.scalar(
+        select(ClassEnrollment).where(
+            ClassEnrollment.class_id == target_cls.id,
+            ClassEnrollment.da == body.da,
+        )
+    )
+    already_in_target = existing_target is not None
+    if not already_in_target:
+        db.add(
+            ClassEnrollment(
+                class_id=target_cls.id,
+                da=body.da,
+                suggested_name=source_enrollment.suggested_name,
+                max_active_grams_override=source_enrollment.max_active_grams_override,
+                max_print_minutes_override=source_enrollment.max_print_minutes_override,
+            )
+        )
+
+    if body.remove_from_source:
+        db.delete(source_enrollment)
+
+    db.commit()
+    return TransferStudentOut(
+        da=body.da,
+        source_class_id=source_cls.id,
+        target_class_id=target_cls.id,
+        moved=body.remove_from_source,
+        already_in_target=already_in_target,
+    )
+
+
 @router.delete("/classes/{class_id}/students/{da}", response_model=ClassStudentRemoveOut)
 def admin_remove_class_student(
     class_id: int,
     da: str,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> ClassStudentRemoveOut:
     tc = db.get(TeacherClass, class_id)
     if tc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
-    if staff_user.role != "admin" and tc.teacher_id != staff_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "FORBIDDEN", "message": "You do not own this class"},
-        )
+    _assert_class_access(staff_user, tc)
 
     enrollment = db.scalar(
         select(ClassEnrollment).where(ClassEnrollment.class_id == tc.id, ClassEnrollment.da == da)
@@ -1207,11 +1589,11 @@ def admin_remove_class_student(
 
 @router.get("/whitelist", response_model=list[WhitelistEntryOut])
 def admin_list_whitelist(
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> list[WhitelistEntryOut]:
     registered_das = set(db.scalars(select(User.da).where(User.role == "student")))
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL):
         entries = list(
             db.scalars(
                 select(ClassEnrollment)
@@ -1244,7 +1626,7 @@ def admin_list_whitelist(
 @router.post("/whitelist", response_model=WhitelistEntryOut, status_code=status.HTTP_201_CREATED)
 def admin_add_whitelist(
     body: WhitelistEntryCreate,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> WhitelistEntryOut:
     tc = _resolve_legacy_whitelist_class(db, staff_user)
@@ -1278,7 +1660,7 @@ def admin_add_whitelist(
 @router.post("/whitelist/csv", response_model=WhitelistCsvResult)
 async def admin_upload_whitelist_csv(
     file: UploadFile = File(...),
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> WhitelistCsvResult:
     tc = _resolve_legacy_whitelist_class(db, staff_user)
@@ -1332,10 +1714,10 @@ async def admin_upload_whitelist_csv(
 @router.delete("/whitelist/{da}", status_code=status.HTTP_204_NO_CONTENT)
 def admin_delete_whitelist(
     da: str,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.CLASSES_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> None:
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.CLASSES_MANAGE_ALL):
         entries = list(
             db.scalars(
                 select(ClassEnrollment)
@@ -1365,11 +1747,11 @@ def admin_delete_whitelist(
 
 @router.get("/students", response_model=list[AdminStudentOut])
 def admin_list_students(
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> list[AdminStudentOut]:
     sys_settings = get_system_settings(db)
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL):
         my_das = set(
             db.scalars(
                 select(ClassEnrollment.da)
@@ -1411,18 +1793,108 @@ def admin_list_students(
     ]
 
 
+@router.post("/students/refresh-budget", response_model=BudgetRefreshResult)
+def admin_refresh_student_budgets(
+    body: BudgetRefreshRequest,
+    staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
+    db: Session = Depends(get_db),
+) -> BudgetRefreshResult:
+    """Manually refresh active used grams and/or max gram limits for users, a class, or all students."""
+    can_manage_all = has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL)
+    tc: Optional[TeacherClass] = None
+
+    if body.scope == "all":
+        if not can_manage_all:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "Permission 'students:manage_all' is required to refresh all students.",
+                    "required_permission": Permission.STUDENTS_MANAGE_ALL.value,
+                },
+            )
+        target_users = list(
+            db.scalars(select(User).where(User.role == "student").order_by(User.id.asc()))
+        )
+    elif body.scope == "class":
+        tc = db.scalar(
+            select(TeacherClass)
+            .where(TeacherClass.id == body.class_id)
+            .options(selectinload(TeacherClass.enrollments))
+        )
+        if tc is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Class not found")
+        if not can_manage_all and tc.teacher_id != staff_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "FORBIDDEN",
+                    "message": "You do not own this class",
+                    "required_permission": Permission.STUDENTS_MANAGE_ALL.value,
+                },
+            )
+        enrolled_das = [e.da for e in tc.enrollments]
+        target_users = (
+            list(
+                db.scalars(
+                    select(User)
+                    .where(User.role == "student", User.da.in_(enrolled_das))
+                    .order_by(User.id.asc())
+                )
+            )
+            if enrolled_das
+            else []
+        )
+    else:
+        unique_ids = sorted(set(body.user_ids))
+        target_users = list(
+            db.scalars(
+                select(User)
+                .where(User.role == "student", User.id.in_(unique_ids))
+                .order_by(User.id.asc())
+            )
+        )
+        if not can_manage_all:
+            for stu in target_users:
+                _ensure_teacher_owns_student(db, staff_user.id, stu.da)
+
+    now = utcnow()
+    for stu in target_users:
+        if body.reset_usage:
+            stu.budget_reset_at = now
+        if body.max_grams_mode == "default":
+            stu.max_active_grams_override = (
+                tc.default_max_active_grams if (body.scope == "class" and tc is not None) else None
+            )
+        elif body.max_grams_mode == "custom":
+            stu.max_active_grams_override = body.custom_max_grams
+
+    if body.scope == "class" and tc is not None and body.max_grams_mode in ("default", "custom"):
+        enrollment_override = (
+            tc.default_max_active_grams if body.max_grams_mode == "default" else body.custom_max_grams
+        )
+        for enr in tc.enrollments:
+            enr.max_active_grams_override = enrollment_override
+
+    db.commit()
+    return BudgetRefreshResult(
+        refreshed_count=len(target_users),
+        user_ids=[stu.id for stu in target_users],
+    )
+
+
 @router.patch("/students/{user_id}", response_model=AdminStudentOut)
 def admin_patch_student(
     user_id: int,
     body: AdminStudentPatch,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> AdminStudentOut:
     user = db.get(User, user_id)
     if user is None or user.role != "student":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
 
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL):
         _ensure_teacher_owns_student(db, staff_user.id, user.da)
 
     fields = body.model_fields_set
@@ -1451,14 +1923,14 @@ def admin_patch_student(
 def admin_reset_student_password(
     user_id: int,
     body: Optional[ResetPasswordRequest] = None,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> ResetPasswordResponse:
     user = db.get(User, user_id)
     if user is None or user.role != "student":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found")
 
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL):
         _ensure_teacher_owns_student(db, staff_user.id, user.da)
 
     if body and body.new_password:
@@ -1474,7 +1946,7 @@ def admin_reset_student_password(
 
 @router.get("/account-requests", response_model=list[PendingAccountOut])
 def admin_list_account_requests(
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> list[PendingAccountOut]:
     stmt = (
@@ -1483,7 +1955,7 @@ def admin_list_account_requests(
         .options(selectinload(User.requested_teacher))
         .order_by(User.created_at.asc(), User.id.asc())
     )
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL):
         stmt = stmt.where(User.requested_teacher_id == staff_user.id)
     pending_users = list(db.scalars(stmt))
     return [_serialize_pending_account(u) for u in pending_users]
@@ -1493,7 +1965,7 @@ def admin_list_account_requests(
 def admin_decide_account_request(
     user_id: int,
     body: AccountDecisionRequest,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.STUDENTS_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> PendingAccountOut:
     user = db.scalar(
@@ -1502,10 +1974,14 @@ def admin_decide_account_request(
     if user is None or user.role != "student":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student account request not found")
 
-    if staff_user.role == "teacher" and user.requested_teacher_id != staff_user.id:
+    if not has_permission(staff_user, Permission.STUDENTS_MANAGE_ALL) and user.requested_teacher_id != staff_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "FORBIDDEN", "message": "This account request is assigned to another teacher"},
+            detail={
+                "code": "FORBIDDEN",
+                "message": "This account request is assigned to another teacher",
+                "required_permission": Permission.STUDENTS_MANAGE_ALL.value,
+            },
         )
 
     if user.approval_status != "pending":
@@ -1574,7 +2050,7 @@ def admin_decide_account_request(
 
 @router.get("/approvals", response_model=ApprovalsResponse)
 def admin_list_approvals(
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.APPROVALS_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> ApprovalsResponse:
     sys_settings = get_system_settings(db)
@@ -1603,7 +2079,7 @@ def admin_list_approvals(
         .order_by(PrintJob.reviewed_at.desc(), PrintJob.id.desc())
         .limit(30)
     )
-    if staff_user.role == "teacher":
+    if not has_permission(staff_user, Permission.APPROVALS_MANAGE_ALL):
         pending_stmt = pending_stmt.where(PrintJob.teacher_id == staff_user.id)
         history_stmt = history_stmt.where(PrintJob.teacher_id == staff_user.id)
 
@@ -1619,7 +2095,7 @@ def admin_list_approvals(
 async def admin_decide_approval(
     job_id: int,
     body: ApprovalDecisionRequest,
-    staff_user: User = Depends(require_staff),
+    staff_user: User = Depends(require_permission(Permission.APPROVALS_MANAGE_OWN)),
     db: Session = Depends(get_db),
 ) -> JobDetail:
     sys_settings = get_system_settings(db)
@@ -1636,10 +2112,14 @@ async def admin_decide_approval(
     )
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    if staff_user.role == "teacher" and job.teacher_id != staff_user.id:
+    if not has_permission(staff_user, Permission.APPROVALS_MANAGE_ALL) and job.teacher_id != staff_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail={"code": "FORBIDDEN", "message": "This print approval request is assigned to another teacher"},
+            detail={
+                "code": "FORBIDDEN",
+                "message": "This print approval request is assigned to another teacher",
+                "required_permission": Permission.APPROVALS_MANAGE_ALL.value,
+            },
         )
     if job.status != JobStatus.PENDING_APPROVAL.value:
         raise HTTPException(
@@ -1681,12 +2161,12 @@ async def admin_decide_approval(
 
 
 # ---------------------------------------------------------------------------
-# Global Settings (Super-Admin Only)
+# Global Settings (Admin Only)
 # ---------------------------------------------------------------------------
 
 @router.get("/settings", response_model=SystemSettingsOut)
 def admin_get_settings(
-    _super_admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_permission(Permission.SETTINGS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> SystemSettingsOut:
     return serialize_settings(get_system_settings(db))
@@ -1695,7 +2175,7 @@ def admin_get_settings(
 @router.patch("/settings", response_model=SystemSettingsOut)
 def admin_patch_settings(
     body: SystemSettingsPatch,
-    _super_admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_permission(Permission.SETTINGS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> SystemSettingsOut:
     sys_settings = get_system_settings(db)
@@ -1734,13 +2214,13 @@ def admin_patch_settings(
 
 
 # ---------------------------------------------------------------------------
-# FilamentAPI Integration
+# FilamentAPI Integration (Admin Only)
 # ---------------------------------------------------------------------------
 
 @router.post("/filament-api/test", response_model=FilamentApiHealthOut)
 async def admin_test_filament_api(
     body: Optional[FilamentApiTestRequest] = None,
-    _super_admin: User = Depends(require_super_admin),
+    _admin: User = Depends(require_permission(Permission.SETTINGS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> FilamentApiHealthOut:
     """Test connectivity to FilamentAPI using the provided URL or saved setting."""
@@ -1752,7 +2232,7 @@ async def admin_test_filament_api(
 
 @router.get("/filament-api/printers", response_model=list[FilamentApiPrinterOut])
 async def admin_list_filament_api_printers(
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> list[FilamentApiPrinterOut]:
     """List printers configured in FilamentAPI for mapping in the admin panel."""
@@ -1768,7 +2248,7 @@ async def admin_list_filament_api_printers(
 
 @router.post("/printers/sync-filaments", response_model=FilamentSyncResponse)
 async def admin_sync_printer_filaments(
-    _staff: User = Depends(require_staff),
+    _admin: User = Depends(require_permission(Permission.PRINTERS_MANAGE)),
     db: Session = Depends(get_db),
 ) -> FilamentSyncResponse:
     """Query FilamentAPI for all mapped printers and update their loaded filaments."""

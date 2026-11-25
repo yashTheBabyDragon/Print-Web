@@ -119,6 +119,8 @@ class User(Base):
     max_print_minutes_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     notify_browser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notify_webhook_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    permissions_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    budget_reset_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     jobs: Mapped[list[PrintJob]] = relationship(
@@ -152,6 +154,9 @@ class TeacherClass(Base):
     )
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     code: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    default_max_active_grams: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_max_print_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     is_default_individual: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 

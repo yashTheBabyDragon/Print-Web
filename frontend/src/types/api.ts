@@ -46,6 +46,7 @@ export interface UserSummary {
   da: string;
   name: string;
   role: Role;
+  permissions?: string[];
   is_active: boolean;
   approval_status?: ApprovalStatus;
   teachers?: StudentTeacher[];
@@ -267,16 +268,48 @@ export interface StudentAccount {
   total_jobs?: number;
 }
 
+export interface BudgetRefreshRequest {
+  scope: 'users' | 'class' | 'all';
+  user_ids?: number[];
+  class_id?: number | null;
+  reset_usage?: boolean;
+  max_grams_mode?: 'keep' | 'default' | 'custom';
+  custom_max_grams?: number | null;
+}
+
+export interface BudgetRefreshResult {
+  refreshed_count: number;
+  user_ids: number[];
+}
+
 export interface AdminTeacher {
   id: number;
   da: string;
   name: string;
   is_active: boolean;
+  permissions?: string[];
+  has_custom_permissions?: boolean;
   class_count: number;
   student_count: number;
   pending_print_approvals: number;
   pending_account_requests: number;
   created_at: string;
+}
+
+export interface PermissionCatalogItem {
+  key: string;
+  group: string;
+}
+
+export interface PermissionPreset {
+  id: string;
+  permissions: string[];
+}
+
+export interface PermissionCatalog {
+  permissions: PermissionCatalogItem[];
+  presets: PermissionPreset[];
+  role_defaults: Record<Role, string[]>;
 }
 
 export interface ClassEnrollment {
@@ -288,6 +321,11 @@ export interface ClassEnrollment {
   max_print_minutes_override?: number | null;
   is_registered: boolean;
   is_active?: boolean | null;
+  user_id?: number | null;
+  registered_name?: string | null;
+  effective_max_active_grams?: number | null;
+  active_grams_used?: number | null;
+  effective_max_print_minutes?: number | null;
   created_at: string;
 }
 
@@ -297,10 +335,32 @@ export interface TeacherClass {
   teacher_name: string;
   name: string;
   code?: string | null;
+  description?: string | null;
+  default_max_active_grams?: number | null;
+  default_max_print_minutes?: number | null;
   is_default_individual: boolean;
   student_count: number;
+  enrolled_count?: number;
+  registered_count?: number;
+  unclaimed_count?: number;
   enrollments: ClassEnrollment[];
   created_at: string;
+}
+
+export interface ClassBulkAddResult {
+  added: number;
+  skipped: number;
+  invalid: number;
+  reactivated: number;
+  invalid_lines: string[];
+}
+
+export interface ClassTransferResult {
+  da: string;
+  source_class_id: number;
+  target_class_id: number;
+  moved: boolean;
+  already_in_target: boolean;
 }
 
 export interface ClassDeleteResult {

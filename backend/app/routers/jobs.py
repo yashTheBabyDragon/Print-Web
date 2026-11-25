@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_db
+from app.permissions import Permission, require_permission
 from app.models import (
     ClassEnrollment,
     DRAFT_STATUSES,
@@ -120,7 +121,7 @@ async def upload_stl_job(
     file: UploadFile = File(...),
     printer_id: int = Form(...),
     slot_id: int = Form(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.SLICER_USE)),
     db: Session = Depends(get_db),
 ) -> JobDetail:
     """Upload a .stl file, auto-orient it flat on the bed centered at (0,0), and create a DRAFT job."""
@@ -200,7 +201,7 @@ async def upload_stl_job(
 @router.post("/{job_id}/reorient", response_model=JobDetail)
 def reorient_job(
     job_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.SLICER_USE)),
     db: Session = Depends(get_db),
 ) -> JobDetail:
     """Re-run server auto-orient on original.stl and reset transform to centered identity."""
@@ -302,7 +303,7 @@ def get_job_gcode(
 async def slice_job(
     job_id: int,
     payload: TransformPayload,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.SLICER_USE)),
     db: Session = Depends(get_db),
 ) -> JobDetail:
     """Validate bed bounds, bake student transform, and slice using admin profiles."""
@@ -386,7 +387,7 @@ async def slice_job(
 @router.post("/{job_id}/submit", response_model=JobDetail)
 async def submit_job(
     job_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.SLICER_USE)),
     db: Session = Depends(get_db),
 ) -> JobDetail:
     """Atomically verify active budget & duration limit, then queue job in FDM Monster."""
@@ -449,7 +450,7 @@ async def submit_job(
 def request_job_approval(
     job_id: int,
     body: RequestApprovalBody,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission(Permission.SLICER_USE)),
     db: Session = Depends(get_db),
 ) -> JobDetail:
     """Reserve active grams and route a sliced job in PENDING_APPROVAL to a teacher."""

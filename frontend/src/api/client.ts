@@ -4,11 +4,15 @@ import type {
   ApprovalsResponse,
   AuthModeResponse,
   AuthResponse,
+  BudgetRefreshRequest,
+  BudgetRefreshResult,
   CheckDaResponse,
+  ClassBulkAddResult,
   ClassCsvResult,
   ClassDeleteResult,
   ClassEnrollment,
   ClassStudentRemoveResult,
+  ClassTransferResult,
   Filament,
   FilamentApiHealth,
   FilamentApiPrinter,
@@ -18,6 +22,7 @@ import type {
   NotificationSettings,
   OrcaProfile,
   PendingAccountRequest,
+  PermissionCatalog,
   Printer,
   ProfileKind,
   RegisterResponse,
@@ -320,6 +325,11 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
+  adminRefreshStudentBudgets: (body: BudgetRefreshRequest) =>
+    request<BudgetRefreshResult>('/api/admin/students/refresh-budget', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   adminResetPassword: (userId: number, newPassword?: string) =>
     request<{ da: string; temp_password: string }>(
       `/api/admin/students/${userId}/reset-password`,
@@ -366,14 +376,30 @@ export const api = {
       method: 'POST',
     }),
 
-  // Admin: Teachers (Super Admin)
+  // Admin: Permissions & Teachers (Super Admin)
+  adminGetPermissionCatalog: () => request<PermissionCatalog>('/api/admin/permissions/catalog'),
   adminGetTeachers: () => request<AdminTeacher[]>('/api/admin/teachers'),
-  adminCreateTeacher: (data: { identifier: string; name: string; password: string }) =>
+  adminCreateTeacher: (data: {
+    identifier: string;
+    name: string;
+    password: string;
+    permissions?: string[];
+    preset?: string;
+  }) =>
     request<AdminTeacher>('/api/admin/teachers', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  adminUpdateTeacher: (teacherId: number, data: { name?: string; is_active?: boolean }) =>
+  adminUpdateTeacher: (
+    teacherId: number,
+    data: {
+      name?: string;
+      is_active?: boolean;
+      permissions?: string[];
+      preset?: string;
+      reset_permissions?: boolean;
+    }
+  ) =>
     request<AdminTeacher>(`/api/admin/teachers/${teacherId}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
@@ -391,9 +417,31 @@ export const api = {
 
   // Admin: Classes & Enrollments
   adminGetClasses: () => request<TeacherClass[]>('/api/admin/classes'),
-  adminCreateClass: (data: { name: string; code?: string | null; teacher_id?: number | null }) =>
+  adminCreateClass: (data: {
+    name: string;
+    code?: string | null;
+    description?: string | null;
+    default_max_active_grams?: number | null;
+    default_max_print_minutes?: number | null;
+    teacher_id?: number | null;
+  }) =>
     request<TeacherClass>('/api/admin/classes', {
       method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  adminUpdateClass: (
+    classId: number,
+    data: {
+      name?: string;
+      code?: string | null;
+      description?: string | null;
+      default_max_active_grams?: number | null;
+      default_max_print_minutes?: number | null;
+      apply_budget_to_students?: boolean;
+    }
+  ) =>
+    request<TeacherClass>(`/api/admin/classes/${classId}`, {
+      method: 'PATCH',
       body: JSON.stringify(data),
     }),
   adminDeleteClass: (classId: number) =>
@@ -408,6 +456,30 @@ export const api = {
     }
   ) =>
     request<ClassEnrollment>(`/api/admin/classes/${classId}/students`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  adminBulkAddClassStudents: (
+    classId: number,
+    data: {
+      raw_text?: string;
+      entries?: Array<{
+        da: string;
+        suggested_name?: string | null;
+        max_active_grams_override?: number | null;
+        max_print_minutes_override?: number | null;
+      }>;
+    }
+  ) =>
+    request<ClassBulkAddResult>(`/api/admin/classes/${classId}/students/bulk`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  adminTransferClassStudent: (
+    classId: number,
+    data: { da: string; target_class_id: number; remove_from_source?: boolean }
+  ) =>
+    request<ClassTransferResult>(`/api/admin/classes/${classId}/transfer`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),

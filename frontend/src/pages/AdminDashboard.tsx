@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -27,6 +27,7 @@ import type {
   TeacherClass,
 } from '../types/api';
 import { translateApiError } from '../utils/errors';
+import { hasAnyPermission, hasPermission, PERMISSIONS } from '../utils/permissions';
 import { AdminApprovalsTab } from '../components/admin/AdminApprovalsTab';
 import { AdminFilamentsProfilesTab } from '../components/admin/AdminFilamentsProfilesTab';
 import { AdminPrintersTab } from '../components/admin/AdminPrintersTab';
@@ -49,9 +50,32 @@ interface AdminDashboardProps {
 export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
   const { user } = useAuth();
   const { t } = useI18n();
-  const isSuperAdmin = user?.role === 'admin';
 
-  const [tab, setTab] = useState<AdminTabId>('printers');
+  const canManagePrinters = hasPermission(user, PERMISSIONS.PRINTERS_MANAGE);
+  const canManageFilaments = hasPermission(user, PERMISSIONS.FILAMENTS_MANAGE);
+  const canManageProfiles = hasPermission(user, PERMISSIONS.PROFILES_MANAGE);
+  const canManageClasses = hasAnyPermission(user, [
+    PERMISSIONS.CLASSES_MANAGE_OWN,
+    PERMISSIONS.CLASSES_MANAGE_ALL,
+  ]);
+  const canManageStudents = hasAnyPermission(user, [
+    PERMISSIONS.STUDENTS_MANAGE_OWN,
+    PERMISSIONS.STUDENTS_MANAGE_ALL,
+  ]);
+  const canManageApprovals = hasAnyPermission(user, [
+    PERMISSIONS.APPROVALS_MANAGE_OWN,
+    PERMISSIONS.APPROVALS_MANAGE_ALL,
+  ]);
+  const canManageTeachers = hasPermission(user, PERMISSIONS.TEACHERS_MANAGE);
+  const canManageSettings = hasPermission(user, PERMISSIONS.SETTINGS_MANAGE);
+  const canManageAllClasses = hasPermission(user, PERMISSIONS.CLASSES_MANAGE_ALL);
+  const canManageAllApprovals = hasPermission(user, PERMISSIONS.APPROVALS_MANAGE_ALL);
+
+  const isTeacherPortal = !canManagePrinters && !canManageSettings && !canManageTeachers;
+
+  const [tab, setTab] = useState<AdminTabId>(() =>
+    canManagePrinters ? 'printers' : 'students'
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,16 +97,22 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
     setError(null);
     try {
       const [p, f, pr, cl, st, ap, ar, te, se, fap] = await Promise.all([
-        api.adminGetPrinters(),
-        api.adminGetFilaments(),
-        api.adminGetProfiles(),
-        api.adminGetClasses(),
-        api.adminGetStudents(),
-        api.adminGetApprovals(),
-        api.adminGetAccountRequests(),
-        isSuperAdmin ? api.adminGetTeachers() : Promise.resolve<AdminTeacher[]>([]),
-        isSuperAdmin ? api.adminGetSettings() : Promise.resolve<SystemSettings | null>(null),
-        api.adminGetFilamentApiPrinters().catch(() => [] as FilamentApiPrinter[]),
+        canManagePrinters ? api.adminGetPrinters() : Promise.resolve<AdminPrinter[]>([]),
+        canManageFilaments ? api.adminGetFilaments() : Promise.resolve<Filament[]>([]),
+        canManageProfiles ? api.adminGetProfiles() : Promise.resolve<OrcaProfile[]>([]),
+        canManageClasses ? api.adminGetClasses() : Promise.resolve<TeacherClass[]>([]),
+        canManageStudents ? api.adminGetStudents() : Promise.resolve<StudentAccount[]>([]),
+        canManageApprovals
+          ? api.adminGetApprovals()
+          : Promise.resolve<ApprovalsResponse>({ pending: [], history: [] }),
+        canManageStudents
+          ? api.adminGetAccountRequests()
+          : Promise.resolve<PendingAccountRequest[]>([]),
+        canManageTeachers ? api.adminGetTeachers() : Promise.resolve<AdminTeacher[]>([]),
+        canManageSettings ? api.adminGetSettings() : Promise.resolve<SystemSettings | null>(null),
+        canManagePrinters
+          ? api.adminGetFilamentApiPrinters().catch(() => [] as FilamentApiPrinter[])
+          : Promise.resolve<FilamentApiPrinter[]>([]),
       ]);
       setPrinters(p);
       setFilaments(f);
@@ -99,40 +129,75 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
     } finally {
       setLoading(false);
     }
-  }, [isSuperAdmin, t]);
+  }, [
+    canManagePrinters,
+    canManageFilaments,
+    canManageProfiles,
+    canManageClasses,
+    canManageStudents,
+    canManageApprovals,
+    canManageTeachers,
+    canManageSettings,
+    t,
+  ]);
 
   useEffect(() => {
     reloadAll();
   }, [reloadAll]);
 
-  useEffect(() => {
-    if (!isSuperAdmin && (tab === 'teachers' || tab === 'settings')) {
-      setTab('printers');
-    }
-  }, [isSuperAdmin, tab]);
-
   const pendingApprovalsCount = approvals.pending.length + accountRequests.length;
 
-  const tabs: Array<{ id: AdminTabId; label: string; icon: typeof Printer; badge?: number }> = [
-    { id: 'printers', label: t.admin.tabs.printers, icon: Printer },
-    { id: 'filaments', label: t.admin.tabs.filaments, icon: Palette },
-    { id: 'students', label: t.admin.tabs.students, icon: Users },
-    {
-      id: 'approvals',
-      label: t.admin.tabs.approvals,
-      icon: ShieldCheck,
-      badge: pendingApprovalsCount,
-    },
-    ...(isSuperAdmin
-      ? [
-          { id: 'teachers' as const, label: t.admin.tabs.teachers, icon: GraduationCap },
-          { id: 'settings' as const, label: t.admin.tabs.settings, icon: Settings },
-        ]
-      : []),
-  ];
+  const tabs = useMemo(() => {
+    const list: Array<{ id: AdminTabId; label: string; icon: typeof Printer; badge?: number }> = [];
+    if (canManagePrinters) {
+      list.push({ id: 'printers', label: t.admin.tabs.printers, icon: Printer });
+    }
+    if (canManageFilaments || canManageProfiles) {
+      list.push({ id: 'filaments', label: t.admin.tabs.filaments, icon: Palette });
+    }
+    if (canManageClasses || canManageStudents) {
+      list.push({ id: 'students', label: t.admin.tabs.students, icon: Users });
+    }
+    if (canManageApprovals) {
+      list.push({
+        id: 'approvals',
+        label: t.admin.tabs.approvals,
+        icon: ShieldCheck,
+        badge: pendingApprovalsCount,
+      });
+    }
+    if (canManageTeachers) {
+      list.push({ id: 'teachers', label: t.admin.tabs.teachers, icon: GraduationCap });
+    }
+    if (canManageSettings) {
+      list.push({ id: 'settings', label: t.admin.tabs.settings, icon: Settings });
+    }
+    return list;
+  }, [
+    canManagePrinters,
+    canManageFilaments,
+    canManageProfiles,
+    canManageClasses,
+    canManageStudents,
+    canManageApprovals,
+    canManageTeachers,
+    canManageSettings,
+    pendingApprovalsCount,
+    t,
+  ]);
 
-  const effectiveTab: AdminTabId =
-    !isSuperAdmin && (tab === 'teachers' || tab === 'settings') ? 'printers' : tab;
+  const effectiveTab: AdminTabId = tabs.some((item) => item.id === tab)
+    ? tab
+    : (tabs[0]?.id ?? 'students');
+
+  useEffect(() => {
+    if (effectiveTab !== tab) {
+      setTab(effectiveTab);
+    }
+  }, [effectiveTab, tab]);
+
+  const headerTitle = isTeacherPortal ? t.admin.teacherPortalTitle : t.admin.title;
+  const headerSubtitle = isTeacherPortal ? t.admin.teacherPortalSubtitle : t.admin.subtitle;
 
   return (
     <>
@@ -161,19 +226,19 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
         </div>
       </div>
 
-      {/* Tablet & Desktop (>=768px): Full Admin Dashboard */}
+      {/* Tablet & Desktop (>=768px): Full Admin / Teacher Dashboard */}
       <div className="mx-auto hidden max-w-[1440px] px-4 py-8 sm:px-6 md:block">
         <div className="mb-6">
           <h1 className="text-2xl font-semibold tracking-tight text-[#111318] dark:text-[#F4F5F7]">
-            {t.admin.title}
+            {headerTitle}
           </h1>
-          <p className="mt-1 text-sm text-[#5B616E] dark:text-[#9399A6]">{t.admin.subtitle}</p>
+          <p className="mt-1 text-sm text-[#5B616E] dark:text-[#9399A6]">{headerSubtitle}</p>
         </div>
 
         <div className="flex flex-col gap-6 lg:flex-row">
-          {/* Apple / Antigravity Left Rail (collapses to horizontal strip on tablet) */}
+          {/* Left Rail (collapses to horizontal strip on tablet) */}
           <nav
-            aria-label={t.admin.title}
+            aria-label={headerTitle}
             className="flex shrink-0 gap-1 overflow-x-auto pb-1 lg:w-56 lg:flex-col lg:pb-0"
           >
             {tabs.map((item) => {
@@ -233,7 +298,7 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
               </div>
             ) : (
               <>
-                {effectiveTab === 'printers' && (
+                {effectiveTab === 'printers' && canManagePrinters && (
                   <AdminPrintersTab
                     printers={printers}
                     filaments={filaments}
@@ -244,7 +309,7 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
                     onError={setError}
                   />
                 )}
-                {effectiveTab === 'filaments' && (
+                {effectiveTab === 'filaments' && (canManageFilaments || canManageProfiles) && (
                   <AdminFilamentsProfilesTab
                     filaments={filaments}
                     profiles={profiles}
@@ -252,34 +317,35 @@ export function AdminDashboard({ onGoToPrint }: AdminDashboardProps = {}) {
                     onError={setError}
                   />
                 )}
-                {effectiveTab === 'students' && (
+                {effectiveTab === 'students' && (canManageClasses || canManageStudents) && (
                   <AdminStudentsTab
                     classes={classes}
                     teachers={teachers}
                     students={students}
-                    isSuperAdmin={isSuperAdmin}
+                    accountRequests={accountRequests}
+                    isSuperAdmin={canManageAllClasses}
                     onReload={reloadAll}
                     onError={setError}
                   />
                 )}
-                {effectiveTab === 'approvals' && (
+                {effectiveTab === 'approvals' && canManageApprovals && (
                   <AdminApprovalsTab
                     approvals={approvals}
                     accountRequests={accountRequests}
                     classes={classes}
-                    isSuperAdmin={isSuperAdmin}
+                    isSuperAdmin={canManageAllApprovals}
                     onReload={reloadAll}
                     onError={setError}
                   />
                 )}
-                {effectiveTab === 'teachers' && isSuperAdmin && (
+                {effectiveTab === 'teachers' && canManageTeachers && (
                   <AdminTeachersTab
                     teachers={teachers}
                     onReload={reloadAll}
                     onError={setError}
                   />
                 )}
-                {effectiveTab === 'settings' && isSuperAdmin && (
+                {effectiveTab === 'settings' && canManageSettings && (
                   <AdminSettingsTab
                     settings={settings}
                     onReload={reloadAll}

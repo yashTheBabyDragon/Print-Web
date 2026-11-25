@@ -40,6 +40,7 @@ class UserSummary(BaseModel):
     da: str
     name: str
     role: Literal["student", "teacher", "admin"]
+    permissions: list[str] = Field(default_factory=list)
     approval_status: Literal["approved", "pending", "rejected"] = "approved"
     teachers: list[StudentTeacherOut] = Field(default_factory=list)
     is_active: bool
@@ -399,6 +400,8 @@ class AdminTeacherCreate(BaseModel):
     identifier: str = Field(min_length=2, max_length=120)
     name: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=4, max_length=128)
+    permissions: Optional[list[str]] = None
+    preset: Optional[str] = None
 
     @field_validator("identifier")
     @classmethod
@@ -422,6 +425,9 @@ class AdminTeacherCreate(BaseModel):
 class AdminTeacherPatch(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     is_active: Optional[bool] = None
+    permissions: Optional[list[str]] = None
+    preset: Optional[str] = None
+    reset_permissions: bool = False
 
     @field_validator("name")
     @classmethod
@@ -439,6 +445,8 @@ class AdminTeacherOut(BaseModel):
     da: str
     name: str
     is_active: bool
+    permissions: list[str] = Field(default_factory=list)
+    has_custom_permissions: bool = False
     class_count: int
     student_count: int
     pending_print_approvals: int
@@ -446,9 +454,28 @@ class AdminTeacherOut(BaseModel):
     created_at: datetime
 
 
+class PermissionCatalogItem(BaseModel):
+    key: str
+    group: str
+
+
+class PermissionPresetOut(BaseModel):
+    id: str
+    permissions: list[str]
+
+
+class PermissionCatalogOut(BaseModel):
+    permissions: list[PermissionCatalogItem]
+    presets: list[PermissionPresetOut]
+    role_defaults: dict[str, list[str]]
+
+
 class TeacherClassCreate(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     code: Optional[str] = Field(default=None, max_length=40)
+    description: Optional[str] = Field(default=None, max_length=500)
+    default_max_active_grams: Optional[float] = Field(default=None, gt=0.0, le=5000.0)
+    default_max_print_minutes: Optional[int] = Field(default=None, gt=0, le=10080)
     teacher_id: Optional[int] = None
 
     @field_validator("name")
@@ -459,9 +486,36 @@ class TeacherClassCreate(BaseModel):
             raise ValueError("Class name cannot be blank")
         return cleaned
 
-    @field_validator("code")
+    @field_validator("code", "description")
     @classmethod
-    def validate_code(cls, v: Optional[str]) -> Optional[str]:
+    def validate_optional_text(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        return cleaned or None
+
+
+class TeacherClassPatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=150)
+    code: Optional[str] = Field(default=None, max_length=40)
+    description: Optional[str] = Field(default=None, max_length=500)
+    default_max_active_grams: Optional[float] = Field(default=None, gt=0.0, le=5000.0)
+    default_max_print_minutes: Optional[int] = Field(default=None, gt=0, le=10080)
+    apply_budget_to_students: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Class name cannot be blank")
+        return cleaned
+
+    @field_validator("code", "description")
+    @classmethod
+    def validate_optional_text(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return None
         cleaned = v.strip()
@@ -477,6 +531,11 @@ class ClassEnrollmentOut(BaseModel):
     max_print_minutes_override: Optional[int] = None
     is_registered: bool
     is_active: Optional[bool] = None
+    user_id: Optional[int] = None
+    registered_name: Optional[str] = None
+    effective_max_active_grams: Optional[float] = None
+    active_grams_used: Optional[float] = None
+    effective_max_print_minutes: Optional[int] = None
     created_at: datetime
 
 
@@ -486,10 +545,51 @@ class TeacherClassOut(BaseModel):
     teacher_name: str
     name: str
     code: Optional[str] = None
+    description: Optional[str] = None
+    default_max_active_grams: Optional[float] = None
+    default_max_print_minutes: Optional[int] = None
     is_default_individual: bool
     student_count: int
+    enrolled_count: int
+    registered_count: int
+    unclaimed_count: int
     enrollments: list[ClassEnrollmentOut]
     created_at: datetime
+
+
+class BulkEnrollRequest(BaseModel):
+    raw_text: Optional[str] = None
+    entries: Optional[list[WhitelistEntryCreate]] = None
+
+
+class BulkEnrollResult(BaseModel):
+    added: int
+    skipped: int
+    invalid: int
+    reactivated: int
+    invalid_lines: list[str] = Field(default_factory=list)
+
+
+class TransferStudentRequest(BaseModel):
+    da: str = Field(min_length=7, max_length=7)
+    target_class_id: int
+    remove_from_source: bool = True
+
+    @field_validator("da")
+    @classmethod
+    def validate_da(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not (len(cleaned) == 7 and cleaned.isdigit()):
+            raise ValueError("DA must be a 7-digit string")
+        return cleaned
+
+
+class TransferStudentOut(BaseModel):
+    da: str
+    source_class_id: int
+    target_class_id: int
+    moved: bool
+    already_in_target: bool
 
 
 class ClassDeleteOut(BaseModel):
@@ -527,6 +627,30 @@ class AdminStudentPatch(BaseModel):
     is_active: Optional[bool] = None
     max_active_grams_override: Optional[float] = Field(default=None, gt=0.0, le=5000.0)
     max_print_minutes_override: Optional[int] = Field(default=None, gt=0, le=10080)
+
+
+class BudgetRefreshRequest(BaseModel):
+    scope: Literal["users", "class", "all"]
+    user_ids: list[int] = Field(default_factory=list)
+    class_id: Optional[int] = None
+    reset_usage: bool = True
+    max_grams_mode: Literal["keep", "default", "custom"] = "keep"
+    custom_max_grams: Optional[float] = Field(default=None, gt=0.0, le=5000.0)
+
+    @model_validator(mode="after")
+    def validate_refresh_request(self) -> "BudgetRefreshRequest":
+        if self.scope == "users" and not self.user_ids:
+            raise ValueError("user_ids must not be empty when scope is 'users'")
+        if self.scope == "class" and self.class_id is None:
+            raise ValueError("class_id is required when scope is 'class'")
+        if self.max_grams_mode == "custom" and self.custom_max_grams is None:
+            raise ValueError("custom_max_grams is required when max_grams_mode is 'custom'")
+        return self
+
+
+class BudgetRefreshResult(BaseModel):
+    refreshed_count: int
+    user_ids: list[int] = Field(default_factory=list)
 
 
 class ResetPasswordRequest(BaseModel):
