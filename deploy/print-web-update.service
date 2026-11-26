@@ -1,0 +1,13 @@
+[Unit]
+Description=Print-Web On-Demand GitHub Release Updater (Docker Compose)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/print-web
+EnvironmentFile=-/opt/print-web/.env
+ExecStart=/opt/print-web/deploy/update-from-release.sh --from-trigger
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for On-Demand Print-Web Update Requests
+
+[Path]
+PathExists=/opt/print-web/updater/request.json
+Unit=print-web-update.service
+
+[Install]
+WantedBy=multi-user.target
