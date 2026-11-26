@@ -30,7 +30,7 @@ from app.schemas import (
     SetupTestOrcaRequest,
 )
 from app.services.budget import build_user_summary, get_system_settings
-from app.services.fdm_monster import FdmMonsterError, LiveFdmMonsterAdapter
+from app.services.fdm_monster import FdmMonsterError, LiveFdmMonsterAdapter, normalize_fdm_api_key
 from app.services.slicer import validate_orca_cli_path
 
 router = APIRouter(prefix="/api/setup", tags=["setup"])
@@ -208,10 +208,10 @@ async def setup_test_fdm(
             detail="FDM Monster URL must start with http:// or https://",
         )
 
-    if body.fdm_monster_api_key is not None and not body.fdm_monster_api_key.startswith("*"):
-        api_key = body.fdm_monster_api_key.strip()
+    if body.fdm_monster_api_key is not None and not body.fdm_monster_api_key.startswith(("*", "\u2022")):
+        api_key = normalize_fdm_api_key(body.fdm_monster_api_key)
     else:
-        api_key = sys_settings.fdm_monster_api_key or ""
+        api_key = normalize_fdm_api_key(sys_settings.fdm_monster_api_key or "")
 
     adapter = LiveFdmMonsterAdapter(base_url=url, api_key=api_key)
     try:
@@ -414,8 +414,8 @@ def complete_setup(
     if body.fdm_monster_url is not None and body.fdm_monster_url.strip():
         sys_settings.fdm_monster_url = body.fdm_monster_url.strip()
 
-    if body.fdm_monster_api_key is not None and not body.fdm_monster_api_key.startswith("*"):
-        sys_settings.fdm_monster_api_key = body.fdm_monster_api_key.strip()
+    if body.fdm_monster_api_key is not None and not body.fdm_monster_api_key.startswith(("*", "\u2022")):
+        sys_settings.fdm_monster_api_key = normalize_fdm_api_key(body.fdm_monster_api_key)
 
     if body.default_max_active_grams is not None:
         sys_settings.default_max_active_grams = body.default_max_active_grams

@@ -725,3 +725,61 @@ def test_heavy_stl_preview_decimation_and_mesh_etag_caching(
     assert len(r_mesh_full.content) > len(r_mesh_preview.content)
     loaded_full = trimesh.load(io.BytesIO(r_mesh_full.content), file_type="stl", force="mesh", process=False)
     assert len(loaded_full.faces) == orig_faces
+
+
+def test_live_fdm_monster_api_key_normalization_and_401_diagnostics(monkeypatch):
+    import asyncio
+    import httpx
+    import pytest
+    from app.services.fdm_monster import FdmMonsterError, LiveFdmMonsterAdapter
+
+    # 1. Strips whitespace, matching quotes, and redundant "Bearer " prefix
+    adapter = LiveFdmMonsterAdapter(
+        "http://fdm-monster:4000",
+        '  Bearer "fdmm_api_123456789012345678901234567890"  ',
+    )
+    assert adapter.api_key == "fdmm_api_123456789012345678901234567890"
+    assert adapter._headers() == {"Authorization": "Bearer fdmm_api_123456789012345678901234567890"}
+
+    # 2. Rejects truncated preview / short fdmm_api_ keys before making network calls
+    called = False
+
+    async def fail_if_called(self, url, **kwargs):  # noqa: ANN001
+        nonlocal called
+        called = True
+        raise AssertionError("Network call should not happen for truncated key")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fail_if_called)
+
+    for bad_key in ("fdmm_api_uFAu7x\u2026", "fdmm_api_short"):
+        bad_adapter = LiveFdmMonsterAdapter("http://fdm-monster:4000", bad_key)
+        with pytest.raises(FdmMonsterError) as exc_info:
+            asyncio.run(bad_adapter.list_printers())
+        msg = str(exc_info.value)
+        assert "truncated" in msg
+        assert "full one-time" in msg
+    assert called is False
+
+    # 3. Clear 401 diagnostics with empty and non-empty tokens
+    async def mock_401_get(self, url, **kwargs):  # noqa: ANN001
+        req = httpx.Request("GET", url)
+        return httpx.Response(401, json={"message": "Invalid API key"}, request=req)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_401_get)
+
+    empty_adapter = LiveFdmMonsterAdapter("http://fdm-monster:4000", "")
+    with pytest.raises(FdmMonsterError) as empty_exc:
+        asyncio.run(empty_adapter.list_printers())
+    assert "401 Unauthorized" in str(empty_exc.value)
+    assert "no API key sent" in str(empty_exc.value)
+    assert "Invalid API key" in str(empty_exc.value)
+
+    full_token = "fdmm_api_" + ("A" * 43)
+    full_adapter = LiveFdmMonsterAdapter("http://fdm-monster:4000", full_token)
+    with pytest.raises(FdmMonsterError) as full_exc:
+        asyncio.run(full_adapter.list_printers())
+    full_msg = str(full_exc.value)
+    assert "401 Unauthorized" in full_msg
+    assert f"len={len(full_token)}" in full_msg
+    assert "Invalid API key" in full_msg
+    assert full_token not in full_msg

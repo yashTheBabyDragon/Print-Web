@@ -125,7 +125,7 @@ from app.services.budget import (
     get_effective_limits,
     get_system_settings,
 )
-from app.services.fdm_monster import FdmMonsterError, get_fdm_adapter
+from app.services.fdm_monster import FdmMonsterError, get_fdm_adapter, normalize_fdm_api_key
 from app.services.filament_api import (
     FilamentApiClient,
     FilamentApiError,
@@ -3608,8 +3608,8 @@ def admin_patch_settings(
         sys_settings.fdm_monster_url = body.fdm_monster_url.strip()
     if "fdm_monster_api_key" in fields and body.fdm_monster_api_key is not None:
         # Ignore masked placeholder if client sends back masked value unchanged
-        if not body.fdm_monster_api_key.startswith("*"):
-            sys_settings.fdm_monster_api_key = body.fdm_monster_api_key.strip()
+        if not body.fdm_monster_api_key.startswith(("*", "\u2022")):
+            sys_settings.fdm_monster_api_key = normalize_fdm_api_key(body.fdm_monster_api_key)
     if "slicer_mode" in fields and body.slicer_mode is not None:
         if body.slicer_mode == "mock" and not settings.dev_seed:
             raise HTTPException(

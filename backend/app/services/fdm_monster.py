@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -161,6 +162,70 @@ class MockFdmMonsterAdapter:
         return entry["status"] if entry else None
 
 
+def normalize_fdm_api_key(raw: str) -> str:
+    """Normalize a user-supplied FDM Monster API key (quotes, whitespace, optional Bearer prefix)."""
+    key = (raw or "").strip()
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in ('"', "'"):
+        key = key[1:-1].strip()
+    key = re.sub(r"^bearer\s+", "", key, flags=re.IGNORECASE).strip()
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in ('"', "'"):
+        key = key[1:-1].strip()
+    return key
+
+
+def detect_truncated_fdm_api_key(api_key: str) -> Optional[str]:
+    """Return a user-facing error if `api_key` looks like FDM Monster's table preview or truncated string."""
+    if not api_key:
+        return None
+    if api_key.endswith("\u2026") or api_key.endswith("...") or (
+        api_key.startswith("fdmm_api_") and len(api_key) <= 25
+    ):
+        return (
+            "The FDM Monster API key looks truncated (e.g. copied from the API Keys table preview "
+            "'fdmm_api_xxxx…'). Create a new key in FDM Monster and copy the full one-time secret "
+            "shown in the creation dialog."
+        )
+    return None
+
+
+def _extract_fdm_error_message(response: httpx.Response) -> str:
+    """Extract a concise upstream error message from an FDM Monster error response."""
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            for field in ("message", "error", "reason", "detail"):
+                val = payload.get(field)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()[:200]
+    except Exception:
+        pass
+    text = (response.text or "").strip()
+    if text:
+        return text[:200]
+    return ""
+
+
+def _format_fdm_http_error(action: str, exc: httpx.HTTPStatusError, api_key: str) -> str:
+    """Build an actionable error message for FDM Monster HTTP failures without leaking secrets."""
+    status_code = exc.response.status_code
+    upstream = _extract_fdm_error_message(exc.response)
+    if status_code == 401:
+        if not api_key:
+            base = (
+                f"Failed to {action}: 401 Unauthorized from {exc.request.url} "
+                "(no API key sent — enter your full FDM Monster fdmm_api_... key)"
+            )
+        else:
+            base = (
+                f"Failed to {action}: 401 Unauthorized from {exc.request.url} "
+                f"(sent Authorization: Bearer token, len={len(api_key)}; verify you copied the full "
+                "one-time fdmm_api_... secret, not the table preview or Slicer API key)"
+            )
+    else:
+        base = f"Failed to {action}: HTTP {status_code} from {exc.request.url}"
+    return f"{base} — {upstream}" if upstream else base
+
+
 class LiveFdmMonsterAdapter:
     """HTTP client adapter talking to a live FDM Monster v2 instance."""
 
@@ -171,7 +236,7 @@ class LiveFdmMonsterAdapter:
                 cleaned = cleaned[: -len(suffix)].rstrip("/")
                 break
         self.base_url = cleaned
-        self.api_key = api_key.strip()
+        self.api_key = normalize_fdm_api_key(api_key)
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -232,6 +297,9 @@ class LiveFdmMonsterAdapter:
         return None, fdm_monster_job_id
 
     async def list_printers(self) -> list[RemotePrinterInfo]:
+        trunc_err = detect_truncated_fdm_api_key(self.api_key)
+        if trunc_err:
+            raise FdmMonsterError(trunc_err)
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(f"{self.base_url}/api/v2/printer", headers=self._headers())
@@ -287,6 +355,8 @@ class LiveFdmMonsterAdapter:
                         )
                     )
                 return printers
+        except httpx.HTTPStatusError as exc:
+            raise FdmMonsterError(_format_fdm_http_error("fetch printers from FDM Monster", exc, self.api_key)) from exc
         except Exception as exc:
             raise FdmMonsterError(f"Failed to fetch printers from FDM Monster: {exc}") from exc
 
@@ -298,6 +368,9 @@ class LiveFdmMonsterAdapter:
     ) -> tuple[str, str]:
         if not gcode_path.exists():
             raise FdmMonsterError("Sliced G-code file missing on disk")
+        trunc_err = detect_truncated_fdm_api_key(self.api_key)
+        if trunc_err:
+            raise FdmMonsterError(trunc_err)
         unique_name = f"printweb_j{job.id}_{uuid.uuid4().hex[:6]}_{gcode_path.name}"
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -328,12 +401,17 @@ class LiveFdmMonsterAdapter:
                 raw_status = str(job_obj.get("status", "QUEUED")).upper()
                 status_val = JobStatus.PRINTING.value if raw_status == "PRINTING" else JobStatus.QUEUED.value
                 return remote_id, status_val
+        except httpx.HTTPStatusError as exc:
+            raise FdmMonsterError(_format_fdm_http_error("submit job to FDM Monster", exc, self.api_key)) from exc
         except FdmMonsterError:
             raise
         except Exception as exc:
             raise FdmMonsterError(f"Failed to submit job to FDM Monster: {exc}") from exc
 
     async def cancel_job(self, fdm_monster_job_id: str) -> None:
+        trunc_err = detect_truncated_fdm_api_key(self.api_key)
+        if trunc_err:
+            raise FdmMonsterError(trunc_err)
         printer_id, job_id = self._split_remote_job_id(fdm_monster_job_id)
         printer_q = quote(printer_id, safe="") if printer_id else None
         job_q = quote(job_id, safe="")
@@ -360,6 +438,8 @@ class LiveFdmMonsterAdapter:
                     stop_resp.raise_for_status()
                     return
                 resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise FdmMonsterError(_format_fdm_http_error("cancel job on FDM Monster", exc, self.api_key)) from exc
         except Exception as exc:
             raise FdmMonsterError(f"Failed to cancel job on FDM Monster: {exc}") from exc
 

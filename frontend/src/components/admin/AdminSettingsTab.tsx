@@ -16,6 +16,7 @@ import { api } from '../../api/client';
 import { useI18n } from '../../i18n';
 import type {
   FilamentApiHealth,
+  SetupTestFdmResponse,
   SetupTestOrcaResponse,
   SystemSettings,
   SystemUpdateStatus,
@@ -52,6 +53,8 @@ export function AdminSettingsTab({
   const [savedToast, setSavedToast] = useState(false);
   const [testingFilamentApi, setTestingFilamentApi] = useState(false);
   const [filamentApiTest, setFilamentApiTest] = useState<FilamentApiHealth | null>(null);
+  const [testingFdm, setTestingFdm] = useState(false);
+  const [fdmTest, setFdmTest] = useState<SetupTestFdmResponse | null>(null);
   const [testingOrca, setTestingOrca] = useState(false);
   const [orcaTest, setOrcaTest] = useState<SetupTestOrcaResponse | null>(null);
   const [updateStatus, setUpdateStatus] = useState<SystemUpdateStatus | null>(null);
@@ -186,6 +189,25 @@ export function AdminSettingsTab({
       });
     } finally {
       setTestingFilamentApi(false);
+    }
+  };
+
+  const handleTestFdm = async () => {
+    if (!form) return;
+    setTestingFdm(true);
+    setFdmTest(null);
+    try {
+      const res = await api.testSetupFdmMonster(form.fdm_monster_url, apiKeyInput);
+      setFdmTest(res);
+    } catch (err) {
+      setFdmTest({
+        ok: false,
+        printer_count: 0,
+        printers: [],
+        detail: translateApiError(err, t),
+      });
+    } finally {
+      setTestingFdm(false);
     }
   };
 
@@ -515,13 +537,54 @@ export function AdminSettingsTab({
             <label className="mb-1.5 block text-xs font-medium text-[#5B616E] dark:text-[#9399A6]">
               {t.admin.settings.fdmApiKey}
             </label>
-            <input
-              type="password"
-              value={apiKeyInput}
-              placeholder={form.fdm_monster_api_key || '••••••••'}
-              onChange={(e) => setApiKeyInput(e.target.value)}
-              className="studio-input font-mono text-xs"
-            />
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                type="password"
+                value={apiKeyInput}
+                placeholder={form.fdm_monster_api_key || '••••••••'}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                className="studio-input flex-1 font-mono text-xs"
+              />
+              <button
+                type="button"
+                disabled={testingFdm || !form.fdm_monster_url.trim()}
+                onClick={() => void handleTestFdm()}
+                className="btn-secondary shrink-0 px-3 py-2 text-xs"
+              >
+                {testingFdm ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Plug className="h-3.5 w-3.5" />
+                )}
+                {testingFdm ? t.setup.testingFdm : t.setup.testFdmBtn}
+              </button>
+            </div>
+            {fdmTest && (
+              <div
+                className={`mt-2 flex items-start gap-1.5 break-words rounded-xl px-3 py-2 text-xs ${
+                  fdmTest.ok
+                    ? 'bg-emerald-500/12 text-emerald-800 dark:text-emerald-300'
+                    : 'bg-rose-500/12 text-rose-800 dark:text-rose-300'
+                }`}
+              >
+                {fdmTest.ok ? (
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                ) : (
+                  <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                )}
+                <div className="min-w-0 space-y-0.5">
+                  <div className="font-medium">
+                    {fdmTest.ok
+                      ? `${t.setup.fdmOk} · ${t.setup.fdmPrintersFound.replace(
+                          '{count}',
+                          String(fdmTest.printer_count)
+                        )}`
+                      : t.setup.fdmFail}
+                  </div>
+                  {fdmTest.detail && <div className="break-words opacity-90">{fdmTest.detail}</div>}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

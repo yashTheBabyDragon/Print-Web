@@ -491,10 +491,7 @@ export function SetupWizardPage({
                       />
                     </div>
                   </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-[11px] text-[#5B616E] dark:text-[#9399A6]">
-                      {fdmResult?.detail || ''}
-                    </span>
+                  <div className="flex items-center justify-end gap-2">
                     <button
                       type="button"
                       disabled={testingFdm || !fdmUrl.trim()}
@@ -509,6 +506,17 @@ export function SetupWizardPage({
                       {testingFdm ? t.setup.testingFdm : t.setup.testFdmBtn}
                     </button>
                   </div>
+                  {fdmResult?.detail && (
+                    <div
+                      className={`break-words rounded-xl px-3 py-2 text-xs ${
+                        fdmResult.ok
+                          ? 'bg-emerald-500/12 text-emerald-800 dark:text-emerald-300'
+                          : 'bg-rose-500/12 text-rose-800 dark:text-rose-300'
+                      }`}
+                    >
+                      {fdmResult.detail}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex justify-end pt-2">
