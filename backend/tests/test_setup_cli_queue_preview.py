@@ -783,3 +783,50 @@ def test_live_fdm_monster_api_key_normalization_and_401_diagnostics(monkeypatch)
     assert f"len={len(full_token)}" in full_msg
     assert "Invalid API key" in full_msg
     assert full_token not in full_msg
+
+
+def test_live_fdm_monster_queue_job_submits_when_idle_and_queues_when_printing(monkeypatch, tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    import httpx
+    from app.services.fdm_monster import LiveFdmMonsterAdapter
+
+    gcode_path = tmp_path / "model.gcode"
+    gcode_path.write_text("; sample gcode\nG28\n", encoding="utf-8")
+
+    called_urls: list[str] = []
+
+    async def mock_post(self, url, **kwargs):  # noqa: ANN001
+        called_urls.append(str(url))
+        req = httpx.Request("POST", url)
+        if str(url).endswith("/api/v2/file-storage/upload"):
+            return httpx.Response(200, json={"fileStorageId": "fs-1"}, request=req)
+        if str(url).endswith("/api/v2/print-queue/4/from-file"):
+            return httpx.Response(200, json={"id": 42, "status": "QUEUED"}, request=req)
+        if str(url).endswith("/api/v2/print-queue/4/submit/42"):
+            return httpx.Response(200, json={"message": "Job submitted to printer for printing"}, request=req)
+        raise AssertionError(f"Unexpected POST url: {url}")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    adapter = LiveFdmMonsterAdapter("http://fdm-monster:4000", "fdmm_api_" + ("B" * 43))
+    job = SimpleNamespace(id=99)
+
+    idle_printer = SimpleNamespace(id=3, fdm_monster_id="4", status="idle")
+    remote_id_idle, status_idle = asyncio.run(adapter.queue_job(idle_printer, gcode_path, job))
+    assert remote_id_idle == "4:42"
+    assert status_idle == "PRINTING"
+    assert called_urls == [
+        "http://fdm-monster:4000/api/v2/file-storage/upload",
+        "http://fdm-monster:4000/api/v2/print-queue/4/from-file",
+        "http://fdm-monster:4000/api/v2/print-queue/4/submit/42",
+    ]
+
+    called_urls.clear()
+    busy_printer = SimpleNamespace(id=3, fdm_monster_id="4", status="printing")
+    remote_id_busy, status_busy = asyncio.run(adapter.queue_job(busy_printer, gcode_path, job))
+    assert remote_id_busy == "4:42"
+    assert status_busy == "QUEUED"
+    assert called_urls == [
+        "http://fdm-monster:4000/api/v2/file-storage/upload",
+        "http://fdm-monster:4000/api/v2/print-queue/4/from-file",
+    ]

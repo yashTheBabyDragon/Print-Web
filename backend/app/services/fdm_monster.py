@@ -400,6 +400,14 @@ class LiveFdmMonsterAdapter:
                 remote_id = f"{printer.fdm_monster_id}:{remote_num_id}"
                 raw_status = str(job_obj.get("status", "QUEUED")).upper()
                 status_val = JobStatus.PRINTING.value if raw_status == "PRINTING" else JobStatus.QUEUED.value
+                if printer.status != PrinterStatus.PRINTING.value:
+                    remote_job_q = quote(remote_num_id, safe="")
+                    submit_resp = await client.post(
+                        f"{self.base_url}/api/v2/print-queue/{printer_q}/submit/{remote_job_q}",
+                        headers=self._headers(),
+                    )
+                    submit_resp.raise_for_status()
+                    return remote_id, JobStatus.PRINTING.value
                 return remote_id, status_val
         except httpx.HTTPStatusError as exc:
             raise FdmMonsterError(_format_fdm_http_error("submit job to FDM Monster", exc, self.api_key)) from exc
