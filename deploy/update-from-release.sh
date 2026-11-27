@@ -244,6 +244,7 @@ CURRENT_VERSION="$(get_current_version)"
 PREV_REF="$(git -C "${PRINT_WEB_DIR}" rev-parse HEAD)"
 PREV_IMAGE_TAG="$(read_env_var "${ENV_FILE}" "PRINT_WEB_IMAGE_TAG")"
 PREV_IMAGE_TAG="${PREV_IMAGE_TAG:-latest}"
+unset APP_VERSION PRINT_WEB_IMAGE_TAG
 
 # ---------------------------------------------------------------------------
 # 2. Determine target release tag (explicit or latest GitHub Release)
@@ -375,6 +376,8 @@ write_release_state() {
   printf '%s\n' "${ver}" > "${VERSION_FILE}"
   set_env_var "${ENV_FILE}" "APP_VERSION" "${ver}"
   set_env_var "${ENV_FILE}" "PRINT_WEB_IMAGE_TAG" "${img_tag}"
+  export APP_VERSION="${ver}"
+  export PRINT_WEB_IMAGE_TAG="${img_tag}"
 }
 
 start_stack_no_build() {
@@ -400,6 +403,7 @@ rollback_state_only() {
   err "${reason} Rolling back git ref and .env to ${CURRENT_VERSION} (image tag: ${PREV_IMAGE_TAG})..."
   set +e
   git -C "${PRINT_WEB_DIR}" checkout --force "${PREV_REF}"
+  chmod +x "${PRINT_WEB_DIR}/deploy/install-debian.sh" "${PRINT_WEB_DIR}/deploy/update-from-release.sh" 2>/dev/null || true
   write_release_state "${CURRENT_VERSION}" "${PREV_IMAGE_TAG}"
   write_job_status "failed" "${TARGET_TAG}" "${reason} Rolled back to ${CURRENT_VERSION}."
   exit 1
@@ -410,6 +414,7 @@ rollback_full() {
   err "${reason} Rolling back to ${CURRENT_VERSION} (image tag: ${PREV_IMAGE_TAG})..."
   set +e
   git -C "${PRINT_WEB_DIR}" checkout --force "${PREV_REF}"
+  chmod +x "${PRINT_WEB_DIR}/deploy/install-debian.sh" "${PRINT_WEB_DIR}/deploy/update-from-release.sh" 2>/dev/null || true
   write_release_state "${CURRENT_VERSION}" "${PREV_IMAGE_TAG}"
   start_stack_no_build
   if wait_for_health; then
@@ -464,6 +469,7 @@ log "Checking out ${TARGET_TAG} for updated docker-compose.yml and deploy script
 if ! git -C "${PRINT_WEB_DIR}" checkout --force "tags/${TARGET_TAG}"; then
   rollback_state_only "Release tag ${TARGET_TAG} not found in git repository."
 fi
+chmod +x "${PRINT_WEB_DIR}/deploy/install-debian.sh" "${PRINT_WEB_DIR}/deploy/update-from-release.sh" 2>/dev/null || true
 
 TAG_NO_V="${TARGET_TAG#v}"
 IMAGE_CANDIDATES=("${TARGET_TAG}")
