@@ -1,6 +1,6 @@
 # Third-Party Licenses & Notices
 
-Print-Web's own original source code, documentation, and assets are licensed under **CC BY-NC 4.0** (see [`LICENSE`](./LICENSE)). None of the third-party software, libraries, or container base-image packages listed below are covered by CC BY-NC 4.0; each remains governed solely by its own license.
+Print-Web's own original source code, documentation, and assets are licensed under the **PolyForm Noncommercial License 1.0.0** (see [`LICENSE`](./LICENSE)). None of the third-party software, libraries, or container base-image packages listed below are covered by the PolyForm Noncommercial License 1.0.0; each remains governed solely by its own license.
 
 ---
 

@@ -1,25 +1,95 @@
-Creative Commons Attribution-NonCommercial 4.0 International
+PolyForm Noncommercial License 1.0.0
 
-Copyright (c) 2026 Yash G. P. & Weegeeday
+https://polyformproject.org/licenses/noncommercial/1.0.0
 
-This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License. To view a copy of this license, visit http://creativecommons.org/licenses/by-nc/4.0/ or send a letter to Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+Required Notice: Copyright (c) 2026 Yash G. P. & Weegeeday
 
----
+Acceptance
 
-## Scope & Third-Party Exclusions
+In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
 
-The Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0) license above applies **only** to the original **Print-Web** source code, documentation, and assets authored in this repository.
+Copyright License
 
-1. **OrcaSlicer Excluded (`SoftFever/OrcaSlicer`, GNU AGPL-3.0)**
-   - **OrcaSlicer** is an independent third-party project and is **explicitly excluded** from the CC BY-NC 4.0 license.
+The licensor grants you a copyright license for the software to do everything you might do with the software that would otherwise infringe the licensor's copyright in it for any permitted purpose. However, you may only distribute the software according to Distribution License and make changes or new works based on the software according to Changes and New Works License.
+
+Distribution License
+
+The licensor grants you an additional copyright license to distribute copies of the software. Your license to distribute covers distributing the software with changes and new works permitted by Changes and New Works License.
+
+Notices
+
+You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms or the URL for them above, as well as copies of any plain-text lines beginning with Required Notice: that the licensor provided with the software. For example:
+
+Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
+
+Changes and New Works License
+
+The licensor grants you an additional copyright license to make changes and new works based on the software for any permitted purpose.
+
+Patent License
+
+The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software.
+
+Noncommercial Purposes
+
+Any noncommercial purpose is a permitted purpose.
+
+Personal Uses
+
+Personal use for research, experiment, and testing for the benefit of public knowledge, personal study, private entertainment, hobby projects, amateur pursuits, or religious observance, without any anticipated commercial application, is use for a permitted purpose.
+
+Noncommercial Organizations
+
+Use by any charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization, or government institution is use for a permitted purpose regardless of the source of funding or obligations resulting from the funding.
+
+Fair Use
+
+You may have "fair use" rights for the software under the law. These terms do not limit them.
+
+No Other Rights
+
+These terms do not allow you to sublicense or transfer any of your licenses to anyone else, or prevent the licensor from granting licenses to anyone else. These terms do not imply any other licenses.
+
+Patent Defense
+
+If you make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the software granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.
+
+Violations
+
+The first time you are notified in writing that you have violated any of these terms, or done anything with the software not covered by your licenses, your licenses can nonetheless continue if you come into full compliance with these terms, and take practical steps to correct past violations, within 32 days of receiving notice. Otherwise, all your licenses end immediately.
+
+No Liability
+
+As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim.
+
+Definitions
+
+The licensor is the individual or entity offering these terms, and the software is the software the licensor makes available under these terms.
+
+You refers to the individual or entity agreeing to these terms.
+
+Your company is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization. Control means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise. Control can be direct or indirect.
+
+Your licenses are all the licenses granted to you for the software under these terms.
+
+Use means anything you do with the software requiring one of your licenses.
+
+------------------------------------------------------------------------
+
+Scope & Third-Party Exclusions
+
+The PolyForm Noncommercial License 1.0.0 above applies only to the original Print-Web source code, documentation, and assets authored in this repository.
+
+1. OrcaSlicer Excluded (SoftFever/OrcaSlicer, GNU AGPL-3.0)
+   - OrcaSlicer is an independent third-party project and is explicitly excluded from the PolyForm Noncommercial License 1.0.0.
    - Print-Web invokes OrcaSlicer purely as an unmodified external CLI subprocess.
-   - Where pre-built Print-Web Docker images bundle an extracted OrcaSlicer AppImage (`/opt/orcaslicer-builtin`), OrcaSlicer is distributed strictly as a separate aggregate component governed exclusively by the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
-   - Corresponding Source for OrcaSlicer is available at: https://github.com/SoftFever/OrcaSlicer (see also `/opt/orcaslicer-builtin/ORCASLICER_SOURCE_NOTICE.txt` inside the backend container image).
+   - Where pre-built Print-Web Docker images bundle an extracted OrcaSlicer AppImage (/opt/orcaslicer-builtin), OrcaSlicer is distributed strictly as a separate aggregate component governed exclusively by the GNU Affero General Public License v3.0 (AGPL-3.0).
+   - Corresponding Source for OrcaSlicer is available at: https://github.com/SoftFever/OrcaSlicer (see also /opt/orcaslicer-builtin/ORCASLICER_SOURCE_NOTICE.txt inside the backend container image).
 
-2. **All Other Third-Party Dependencies & System Packages Excluded**
-   - All Python packages, npm/JavaScript packages, and container base image OS packages (Debian / Alpine) are excluded from CC BY-NC 4.0 and remain governed solely by their own respective licenses, including weak-copyleft components (`psycopg2-binary` under GNU LGPL-3.0 with OpenSSL exception; `certifi` under MPL-2.0) and permissive components (MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, PSF-2.0, BlueOak-1.0.0).
-   - See `THIRD_PARTY_LICENSES.md` for the full component and license breakdown.
+2. All Other Third-Party Dependencies & System Packages Excluded
+   - All Python packages, npm/JavaScript packages, and container base image OS packages (Debian / Alpine) are excluded from the PolyForm Noncommercial License 1.0.0 and remain governed solely by their own respective licenses, including weak-copyleft components (psycopg2-binary under GNU LGPL-3.0 with OpenSSL exception; certifi under MPL-2.0) and permissive components (MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, PSF-2.0, BlueOak-1.0.0).
+   - See THIRD_PARTY_LICENSES.md for the full component and license breakdown.
 
----
+------------------------------------------------------------------------
 
 For commercial licensing inquiries regarding Print-Web's original code, please contact: weegeeday@weegeeday.com

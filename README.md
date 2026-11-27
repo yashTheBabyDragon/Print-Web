@@ -3,7 +3,7 @@
 [![CI](https://github.com/yashTheBabyDragon/GGPrint-Web/actions/workflows/ci.yml/badge.svg)](https://github.com/yashTheBabyDragon/GGPrint-Web/actions/workflows/ci.yml)
 [![Publish Docker Images](https://github.com/yashTheBabyDragon/GGPrint-Web/actions/workflows/release-docker.yml/badge.svg)](https://github.com/yashTheBabyDragon/GGPrint-Web/actions/workflows/release-docker.yml)
 [![Release](https://github.com/yashTheBabyDragon/GGPrint-Web/actions/workflows/release.yml/badge.svg)](https://github.com/yashTheBabyDragon/GGPrint-Web/actions/workflows/release.yml)
-[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-lightgrey.svg)](LICENSE)
 
 Print-Web is a self-service 3D printing portal for 3D Print Lab with a French/English interface. Students upload `.stl` models, orient them on a Three.js build plate, stay within an active filament weight budget, and submit jobs to Klipper or PrusaLink printers managed by FDM Monster.
 
@@ -101,16 +101,19 @@ npm run dev
 
 | Page | Topics |
 | --- | --- |
-| [Home](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki) | Architecture overview and navigation |
-| [Installation](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Installation) | Debian/Raspberry Pi installer, manual Docker Compose, reverse proxy setup |
-| [Configuration](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Configuration) | Environment variables, `.env` settings, initial admin bootstrap |
-| [Updating](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Updating) | On-demand UI and CLI updates, PostgreSQL backups, rollback |
+| [Home](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki) | Role-based navigation and overview |
+| [Student Guide](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Student-Guide) | Registration, 3D plate controls, slicing, drafts, weight budgets, and print submission |
+| [Teacher Guide](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Teacher-Guide) | Classes, student DA whitelists, per-student limits, and oversized-part approvals |
+| [Troubleshooting](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Troubleshooting) | Common errors, slicer and FDM Monster diagnostics, and web updater checks |
+| [Installation](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Installation) | Debian/Raspberry Pi installer, manual Docker Compose, and reverse proxy setup |
+| [Configuration](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Configuration) | Environment variables, `.env` settings, and initial admin bootstrap |
 | [Printers and OrcaSlicer](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Printers-and-OrcaSlicer) | FDM Monster integration, MMU slots, OrcaSlicer and PrusaSlicer profiles |
-| [Users and Permissions](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Users-and-Permissions) | Roles, RBAC permission keys, classes, filament budgets |
-| [Development](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Development) | Local setup, pytest, Vitest, TypeScript build, shell checks |
+| [Users and Permissions](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Users-and-Permissions) | Roles, RBAC permission keys, classes, and filament budgets |
+| [Updating](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Updating) | On-demand UI and CLI updates, PostgreSQL backups, and rollback |
+| [Development](https://github.com/yashTheBabyDragon/GGPrint-Web/wiki/Development) | Local setup, pytest, Vitest, TypeScript build, and shell checks |
 
 ## License
 
-Original Print-Web source code, documentation, and assets are licensed under [Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)](LICENSE).
+Original Print-Web source code, documentation, and assets are licensed under the [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0) (see [LICENSE](LICENSE)).
 
-Third-party components, including OrcaSlicer (GNU AGPL-3.0), `psycopg2-binary` (GNU LGPL-3.0), Python/npm dependencies, and container base packages, are excluded from CC BY-NC 4.0 and remain under their respective licenses. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the full notice list.
+Third-party components, including OrcaSlicer (GNU AGPL-3.0), `psycopg2-binary` (GNU LGPL-3.0), Python/npm dependencies, and container base packages, are excluded from the PolyForm Noncommercial License 1.0.0 and remain under their respective licenses. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the full notice list.

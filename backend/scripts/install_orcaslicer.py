@@ -185,7 +185,7 @@ def write_source_notice(dest: Path, tag: str, asset_name: str, url: str) -> None
         [
             f"OrcaSlicer ({ORCA_REPO}) -- GNU Affero General Public License v3.0 (AGPL-3.0)",
             "This directory contains an unmodified extracted release of OrcaSlicer, bundled as a",
-            "separate aggregate component and excluded from Print-Web CC BY-NC 4.0 licensing.",
+            "separate aggregate component and excluded from Print-Web PolyForm Noncommercial 1.0.0 licensing.",
             f"Release Tag: {tag}",
             f"Asset: {asset_name}",
             f"Download URL: {url}",
