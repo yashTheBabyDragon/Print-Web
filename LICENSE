@@ -6,4 +6,20 @@ This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 I
 
 ---
 
-For commercial licensing inquiries, please contact: weegeeday@weegeeday.com
+## Scope & Third-Party Exclusions
+
+The Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0) license above applies **only** to the original **Print-Web** source code, documentation, and assets authored in this repository.
+
+1. **OrcaSlicer Excluded (`SoftFever/OrcaSlicer`, GNU AGPL-3.0)**
+   - **OrcaSlicer** is an independent third-party project and is **explicitly excluded** from the CC BY-NC 4.0 license.
+   - Print-Web invokes OrcaSlicer purely as an unmodified external CLI subprocess.
+   - Where pre-built Print-Web Docker images bundle an extracted OrcaSlicer AppImage (`/opt/orcaslicer-builtin`), OrcaSlicer is distributed strictly as a separate aggregate component governed exclusively by the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
+   - Corresponding Source for OrcaSlicer is available at: https://github.com/SoftFever/OrcaSlicer (see also `/opt/orcaslicer-builtin/ORCASLICER_SOURCE_NOTICE.txt` inside the backend container image).
+
+2. **All Other Third-Party Dependencies & System Packages Excluded**
+   - All Python packages, npm/JavaScript packages, and container base image OS packages (Debian / Alpine) are excluded from CC BY-NC 4.0 and remain governed solely by their own respective licenses, including weak-copyleft components (`psycopg2-binary` under GNU LGPL-3.0 with OpenSSL exception; `certifi` under MPL-2.0) and permissive components (MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0, ISC, PSF-2.0, BlueOak-1.0.0).
+   - See `THIRD_PARTY_LICENSES.md` for the full component and license breakdown.
+
+---
+
+For commercial licensing inquiries regarding Print-Web's original code, please contact: weegeeday@weegeeday.com
