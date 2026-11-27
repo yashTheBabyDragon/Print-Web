@@ -20,6 +20,8 @@ from app.schemas import SystemUpdateStatusOut, UpdateJobStatusOut
 logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SECONDS = 600.0
+_STALE_UPDATE_SECONDS = 900.0
+_STALE_QUEUED_HINT_SECONDS = 120.0
 _VERSION_TAG_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _VALID_JOB_STATES = frozenset({"idle", "queued", "updating", "succeeded", "failed"})
 
@@ -75,6 +77,19 @@ def is_updater_configured() -> bool:
     return _get_updater_dir() is not None
 
 
+def _is_job_stale(updated_at: Optional[str], max_age_seconds: float) -> bool:
+    """Return True when `updated_at` parses as an ISO timestamp older than `max_age_seconds`."""
+    if not updated_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(updated_at.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - parsed).total_seconds() >= max_age_seconds
+    except Exception:
+        return False
+
+
 def read_update_job_status() -> Optional[UpdateJobStatusOut]:
     """Read <updater_dir>/status.json safely if configured and present."""
     upd_dir = _get_updater_dir()
@@ -89,12 +104,25 @@ def read_update_job_status() -> Optional[UpdateJobStatusOut]:
             return None
         raw_state = str(data.get("state") or "idle").strip().lower()
         state = raw_state if raw_state in _VALID_JOB_STATES else "idle"
+        updated_at_val = str(data["updated_at"]) if data.get("updated_at") else None
+        message_val = str(data["message"]) if data.get("message") else None
+        if (
+            state == "queued"
+            and (upd_dir / "request.json").is_file()
+            and _is_job_stale(updated_at_val, _STALE_QUEUED_HINT_SECONDS)
+        ):
+            hint = (
+                "Host systemd path watcher 'print-web-update.path' may not be active — "
+                "run 'sudo /opt/print-web/deploy/update-from-release.sh' or check "
+                "'systemctl status print-web-update.path'."
+            )
+            message_val = f"{message_val} ({hint})" if message_val else hint
         return UpdateJobStatusOut(
             state=state,  # type: ignore[arg-type]
             target_version=str(data["target_version"]) if data.get("target_version") else None,
             requested_by=str(data["requested_by"]) if data.get("requested_by") else None,
-            updated_at=str(data["updated_at"]) if data.get("updated_at") else None,
-            message=str(data["message"]) if data.get("message") else None,
+            updated_at=updated_at_val,
+            message=message_val,
         )
     except Exception as exc:
         logger.warning("Failed to parse updater status.json: %s", exc)
@@ -102,9 +130,35 @@ def read_update_job_status() -> Optional[UpdateJobStatusOut]:
 
 
 def _atomic_write_json(dest: Path, payload: dict) -> None:
+    serialized = json.dumps(payload, indent=2)
     tmp_path = dest.with_suffix(dest.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    os.replace(tmp_path, dest)
+    try:
+        tmp_path.write_text(serialized, encoding="utf-8")
+        try:
+            os.chmod(tmp_path, 0o666)
+        except OSError:
+            pass
+        try:
+            os.replace(tmp_path, dest)
+            return
+        except PermissionError:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            dest.write_text(serialized, encoding="utf-8")
+            return
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "UPDATER_WRITE_FAILED",
+                "message": (
+                    f"Cannot write {dest.name} in {dest.parent}: {exc}. "
+                    "On the host, run: sudo chmod 0777 /opt/print-web/updater && sudo rm -f /opt/print-web/updater/status.json"
+                ),
+            },
+        ) from exc
 
 
 def trigger_update(target_version: str, requested_by: str) -> UpdateJobStatusOut:
@@ -130,7 +184,11 @@ def trigger_update(target_version: str, requested_by: str) -> UpdateJobStatusOut
         )
 
     existing = read_update_job_status()
-    if existing is not None and existing.state in ("queued", "updating"):
+    if (
+        existing is not None
+        and existing.state in ("queued", "updating")
+        and not _is_job_stale(existing.updated_at, _STALE_UPDATE_SECONDS)
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={

@@ -55,46 +55,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # /opt/orcaslicer remains a clean optional host mount override.
 # Set --build-arg INSTALL_ORCASLICER=false to skip.
 # ---------------------------------------------------------------------------
-RUN if [ "$INSTALL_ORCASLICER" = "true" ] && [ "$(uname -m)" = "x86_64" ]; then \
-    ORCASLICER_VERSION="$ORCASLICER_VERSION" python3 -c 'import json, os, sys, urllib.request; \
-    ver = os.environ.get("ORCASLICER_VERSION", "latest"); \
-    api = "https://api.github.com/repos/SoftFever/OrcaSlicer/releases/latest" if ver == "latest" else f"https://api.github.com/repos/SoftFever/OrcaSlicer/releases/tags/{ver}"; \
-    req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json", "User-Agent": "print-web-docker-build"}); \
-    resp = urllib.request.urlopen(req, timeout=30); \
-    data = json.loads(resp.read().decode("utf-8")); \
-    resp.close(); \
-    tag = str(data.get("tag_name") or ver).strip(); \
-    assets = data.get("assets", []); \
-    score = lambda a: -1 if not a.get("name", "").lower().endswith(".appimage") or "linux" not in a.get("name", "").lower() or "arm" in a.get("name", "").lower() or "aarch64" in a.get("name", "").lower() else (3 if "ubuntu2404" in a.get("name", "").lower() else (2 if "ubuntu2204" in a.get("name", "").lower() else 1)); \
-    candidates = sorted((a for a in assets if score(a) > 0), key=score, reverse=True); \
-    candidates or sys.exit("No compatible Linux x86_64 OrcaSlicer AppImage found in release assets"); \
-    url = candidates[0]["browser_download_url"]; \
-    asset_name = candidates[0]["name"]; \
-    print("Downloading OrcaSlicer:", asset_name, url); \
-    urllib.request.urlretrieve(url, "/tmp/OrcaSlicer.AppImage"); \
-    notice = "\n".join([ \
-    "OrcaSlicer (SoftFever/OrcaSlicer) — GNU Affero General Public License v3.0 (AGPL-3.0)", \
-    "This directory contains an unmodified extracted release of OrcaSlicer, bundled as a", \
-    "separate aggregate component and excluded from Print-Web CC BY-NC 4.0 licensing.", \
-    f"Release Tag: {tag}", \
-    f"Asset: {asset_name}", \
-    f"Download URL: {url}", \
-    "Upstream Repository: https://github.com/SoftFever/OrcaSlicer", \
-    f"License (AGPL-3.0): https://github.com/SoftFever/OrcaSlicer/blob/{tag}/LICENSE.txt", \
-    f"Corresponding Source Archive: https://github.com/SoftFever/OrcaSlicer/archive/refs/tags/{tag}.tar.gz", \
-    "", \
-    ]); \
-    open("/tmp/ORCASLICER_SOURCE_NOTICE.txt", "w", encoding="utf-8").write(notice)' && \
-    chmod +x /tmp/OrcaSlicer.AppImage && \
-    cd /tmp && /tmp/OrcaSlicer.AppImage --appimage-extract >/dev/null && \
-    rm -rf /opt/orcaslicer-builtin && mv /tmp/squashfs-root /opt/orcaslicer-builtin && \
-    mv /tmp/ORCASLICER_SOURCE_NOTICE.txt /opt/orcaslicer-builtin/ORCASLICER_SOURCE_NOTICE.txt && \
-    rm -f /tmp/OrcaSlicer.AppImage && \
-    chmod -R a+rX /opt/orcaslicer-builtin && \
-    mkdir -p /opt/orcaslicer; \
+COPY backend/scripts/install_orcaslicer.py /tmp/install_orcaslicer.py
+RUN if [ "$INSTALL_ORCASLICER" = "true" ] && ( [ "$(uname -m)" = "x86_64" ] || [ "$(uname -m)" = "aarch64" ] ); then \
+      ORCASLICER_VERSION="$ORCASLICER_VERSION" python3 /tmp/install_orcaslicer.py; \
     else \
-    mkdir -p /opt/orcaslicer-builtin /opt/orcaslicer; \
-    fi
+      mkdir -p /opt/orcaslicer-builtin /opt/orcaslicer; \
+    fi && rm -f /tmp/install_orcaslicer.py
 
 RUN printf '%s\n' \
     '#!/bin/sh' \
@@ -123,7 +89,7 @@ COPY backend/app /app/backend/app
 COPY sample-models /app/sample-models
 
 # Verify baked OrcaSlicer binary & shared libs cleanly at build time
-RUN if [ "$INSTALL_ORCASLICER" = "true" ] && [ "$(uname -m)" = "x86_64" ]; then \
+RUN if [ "$INSTALL_ORCASLICER" = "true" ] && ( [ "$(uname -m)" = "x86_64" ] || [ "$(uname -m)" = "aarch64" ] ); then \
     /usr/local/bin/orca-slicer-headless --help >/dev/null; \
     fi
 

@@ -245,8 +245,8 @@ PRINT_WEB_BACKEND_PORT="${ENV_BACKEND_PORT:-${PRINT_WEB_BACKEND_PORT}}"
 PRINT_WEB_HTTP_PORT="${ENV_FRONTEND_PORT:-${PRINT_WEB_HTTP_PORT}}"
 
 mkdir -p "${PRINT_WEB_DIR}/backups" "${PRINT_WEB_DIR}/updater"
-# Allow the non-root backend container user to write request.json/status.json
-chmod 1777 "${PRINT_WEB_DIR}/updater"
+# Allow both root (systemd updater) and the non-root backend container user to read/replace request.json & status.json
+chmod 0777 "${PRINT_WEB_DIR}/updater"
 chmod +x "${PRINT_WEB_DIR}/deploy/install-debian.sh" "${PRINT_WEB_DIR}/deploy/update-from-release.sh"
 
 # ---------------------------------------------------------------------------
@@ -265,9 +265,18 @@ if [[ "${PRINT_WEB_LOCAL_BUILD}" == "true" ]]; then
   )
 else
   log "Pulling pre-built GHCR Docker images (tag: ${SELECTED_IMAGE_TAG})..."
+  if ! (cd "${PRINT_WEB_DIR}" && docker compose pull); then
+    if [[ "${SELECTED_IMAGE_TAG}" == v* ]]; then
+      SELECTED_IMAGE_TAG="${SELECTED_IMAGE_TAG#v}"
+      log "Retrying GHCR pull with semver tag: ${SELECTED_IMAGE_TAG}..."
+      set_env_var "${ENV_FILE}" "PRINT_WEB_IMAGE_TAG" "${SELECTED_IMAGE_TAG}"
+      (cd "${PRINT_WEB_DIR}" && docker compose pull)
+    else
+      exit 1
+    fi
+  fi
   (
     cd "${PRINT_WEB_DIR}"
-    docker compose pull
     docker compose up -d --no-build --remove-orphans
   )
 fi

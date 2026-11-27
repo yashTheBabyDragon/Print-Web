@@ -243,3 +243,151 @@ def test_update_trigger_rbac_validation_and_file_queue(
     )
     assert r_t_denied.status_code == 403
     assert r_t_denied.json()["detail"]["code"] == "SUPER_ADMIN_REQUIRED"
+
+
+def test_update_trigger_allows_stale_job_and_reports_write_errors(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import json
+
+    a_token = _login(client, "admin", "admin123")["access_token"]
+    upd_dir = tmp_path / "updater"
+    upd_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(settings, "updater_dir", str(upd_dir))
+
+    # 1. Stale queued status (>15 min old) should NOT lock out future updates
+    (upd_dir / "status.json").write_text(
+        json.dumps(
+            {
+                "state": "queued",
+                "target_version": "0.1.4",
+                "requested_by": "admin",
+                "updated_at": "2020-01-01T00:00:00+00:00",
+                "message": "Update to 0.1.4 queued.",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (upd_dir / "request.json").write_text('{"target_version": "0.1.4"}', encoding="utf-8")
+
+    st_before = client.get("/api/admin/system/update-status?force=false", headers=_auth(a_token))
+    assert st_before.status_code == 200
+    assert "print-web-update.path" in (st_before.json()["update_job"]["message"] or "")
+
+    r_requeue = client.post(
+        "/api/admin/system/update-trigger",
+        headers=_auth(a_token),
+        json={"target_version": "0.1.5"},
+    )
+    assert r_requeue.status_code == 202, r_requeue.text
+    assert r_requeue.json()["target_version"] == "0.1.5"
+    assert r_requeue.json()["state"] == "queued"
+
+    # 2. Simulate host permission/write failure -> clean 500 UPDATER_WRITE_FAILED JSON error
+    (upd_dir / "status.json").write_text('{"state": "succeeded"}', encoding="utf-8")
+
+    def _fail_write_text(self, *args, **kwargs):  # noqa: ANN001
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(Path, "write_text", _fail_write_text)
+    r_perm = client.post(
+        "/api/admin/system/update-trigger",
+        headers=_auth(a_token),
+        json={"target_version": "0.1.6"},
+    )
+    assert r_perm.status_code == 500
+    assert r_perm.json()["detail"]["code"] == "UPDATER_WRITE_FAILED"
+
+
+def test_install_orcaslicer_script_discovery_fallback_and_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import importlib.util
+    import json
+
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "install_orcaslicer.py"
+    spec = importlib.util.spec_from_file_location("install_orcaslicer", script_path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.score_asset("OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.2.AppImage", arch="x86_64") == 3
+    assert mod.score_asset("OrcaSlicer_Linux_AppImage_Ubuntu2404_aarch64_V2.5.2.AppImage", arch="x86_64") == -1
+    assert mod.score_asset("OrcaSlicer-Linux-flatpak_V2.5.2_x86_64.flatpak", arch="x86_64") == -1
+    assert mod.score_asset("OrcaSlicer_Linux_AppImage_Ubuntu2404_aarch64_V2.5.2.AppImage", arch="aarch64") == 3
+    assert mod.score_asset("OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.2.AppImage", arch="aarch64") == -1
+
+    class _FakeResp:
+        def __init__(self, body: bytes, final_url: str = ""):
+            self._body = body
+            self._url = final_url
+
+        def read(self) -> bytes:
+            return self._body
+
+        def geturl(self) -> str:
+            return self._url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def _fake_urlopen_web(req, timeout=30):  # noqa: ANN001
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if url.endswith("/releases/latest"):
+            return _FakeResp(b"", "https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/v2.5.2")
+        if url.endswith("/releases/expanded_assets/v2.5.2"):
+            html = (
+                '<a href="/OrcaSlicer/OrcaSlicer/releases/download/v2.5.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_aarch64_V2.5.2.AppImage">arm</a>'
+                '<a href="/OrcaSlicer/OrcaSlicer/releases/download/v2.5.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.2.AppImage">x64</a>'
+            ).encode("utf-8")
+            return _FakeResp(html, url)
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _fake_urlopen_web)
+    tag, asset_name, dl_url = mod.resolve_release_asset("latest", arch="x86_64")
+    assert tag == "v2.5.2"
+    assert asset_name == "OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.2.AppImage"
+    assert dl_url == "https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v2.5.2/OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.2.AppImage"
+
+    tag_arm, asset_arm, _ = mod.resolve_release_asset("latest", arch="aarch64")
+    assert tag_arm == "v2.5.2"
+    assert asset_arm == "OrcaSlicer_Linux_AppImage_Ubuntu2404_aarch64_V2.5.2.AppImage"
+
+    # Fallback to REST API when web discovery raises
+    def _fake_urlopen_api_fallback(req, timeout=30):  # noqa: ANN001
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "github.com/OrcaSlicer/OrcaSlicer/releases" in url:
+            raise OSError("HTML fetch failed")
+        payload = json.dumps(
+            {
+                "tag_name": "v2.5.1",
+                "assets": [
+                    {
+                        "name": "OrcaSlicer_Linux_AppImage_Ubuntu2204_V2.5.1.AppImage",
+                        "browser_download_url": "https://example.invalid/orca-2.5.1.AppImage",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+        return _FakeResp(payload, url)
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", _fake_urlopen_api_fallback)
+    tag2, asset2, dl2 = mod.resolve_release_asset("latest", arch="x86_64")
+    assert (tag2, asset2, dl2) == (
+        "v2.5.1",
+        "OrcaSlicer_Linux_AppImage_Ubuntu2204_V2.5.1.AppImage",
+        "https://example.invalid/orca-2.5.1.AppImage",
+    )
+
+    notice_path = tmp_path / "ORCASLICER_SOURCE_NOTICE.txt"
+    mod.write_source_notice(notice_path, tag, asset_name, dl_url)
+    notice_txt = notice_path.read_text(encoding="utf-8")
+    assert "AGPL-3.0" in notice_txt
+    assert "v2.5.2" in notice_txt
+    assert "archive/refs/tags/v2.5.2.tar.gz" in notice_txt

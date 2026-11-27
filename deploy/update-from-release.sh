@@ -156,6 +156,7 @@ write_job_status() {
   if [[ ! -d "${UPDATER_DIR}" ]]; then
     return 0
   fi
+  chmod 0777 "${UPDATER_DIR}" 2>/dev/null || true
   local now
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local tmp_file="${STATUS_FILE}.tmp.$$"
@@ -174,7 +175,7 @@ write_job_status() {
     printf '{"state":"%s","target_version":"%s","requested_by":"%s","updated_at":"%s","message":"%s"}\n' \
       "${state}" "${target}" "${REQUESTED_BY}" "${now}" "${safe_msg}" > "${tmp_file}"
   fi
-  chmod 0644 "${tmp_file}" 2>/dev/null || true
+  chmod 0666 "${tmp_file}" 2>/dev/null || true
   mv -f "${tmp_file}" "${STATUS_FILE}"
 }
 
@@ -192,6 +193,7 @@ fi
 # 0. Handle --from-trigger mode (systemd .path activation)
 # ---------------------------------------------------------------------------
 if [[ "${FROM_TRIGGER}" -eq 1 ]]; then
+  chmod 0777 "${UPDATER_DIR}" 2>/dev/null || true
   if [[ ! -f "${REQUEST_FILE}" ]]; then
     log "No trigger file at ${REQUEST_FILE}; nothing to do."
     exit 0
@@ -428,6 +430,29 @@ if ! git -C "${PRINT_WEB_DIR}" fetch --tags --force origin; then
   rollback_state_only "Failed to fetch git tags from origin."
 fi
 
+resolve_git_tag() {
+  local cand="$1"
+  if git -C "${PRINT_WEB_DIR}" rev-parse --verify --quiet "refs/tags/${cand}" >/dev/null; then
+    echo "${cand}"
+    return 0
+  fi
+  if [[ "${cand}" != v* ]] && git -C "${PRINT_WEB_DIR}" rev-parse --verify --quiet "refs/tags/v${cand}" >/dev/null; then
+    echo "v${cand}"
+    return 0
+  fi
+  if [[ "${cand}" == v* ]] && git -C "${PRINT_WEB_DIR}" rev-parse --verify --quiet "refs/tags/${cand#v}" >/dev/null; then
+    echo "${cand#v}"
+    return 0
+  fi
+  return 1
+}
+
+if RESOLVED_GIT_TAG="$(resolve_git_tag "${TARGET_TAG}")"; then
+  TARGET_TAG="${RESOLVED_GIT_TAG}"
+else
+  rollback_state_only "Release tag ${TARGET_TAG} not found in git repository."
+fi
+
 if [[ "${PRINT_WEB_VERIFY_SIGNATURES}" == "true" ]]; then
   log "Verifying GPG signature on tag ${TARGET_TAG}..."
   if ! git -C "${PRINT_WEB_DIR}" verify-tag "${TARGET_TAG}"; then
@@ -439,10 +464,27 @@ log "Checking out ${TARGET_TAG} for updated docker-compose.yml and deploy script
 if ! git -C "${PRINT_WEB_DIR}" checkout --force "tags/${TARGET_TAG}"; then
   rollback_state_only "Release tag ${TARGET_TAG} not found in git repository."
 fi
-write_release_state "${TARGET_TAG}" "${TARGET_TAG}"
 
-log "Pulling pre-built GHCR images for ${TARGET_TAG}..."
-if ! (cd "${PRINT_WEB_DIR}" && docker compose pull backend frontend); then
+TAG_NO_V="${TARGET_TAG#v}"
+IMAGE_CANDIDATES=("${TARGET_TAG}")
+if [[ "${TAG_NO_V}" != "${TARGET_TAG}" ]]; then
+  IMAGE_CANDIDATES+=("${TAG_NO_V}")
+fi
+if [[ "v${TAG_NO_V}" != "${TARGET_TAG}" ]]; then
+  IMAGE_CANDIDATES+=("v${TAG_NO_V}")
+fi
+
+PULLED_IMAGE_TAG=""
+for img_cand in "${IMAGE_CANDIDATES[@]}"; do
+  write_release_state "${TARGET_TAG}" "${img_cand}"
+  log "Pulling pre-built GHCR images for ${TARGET_TAG} (image tag: ${img_cand})..."
+  if (cd "${PRINT_WEB_DIR}" && docker compose pull backend frontend); then
+    PULLED_IMAGE_TAG="${img_cand}"
+    break
+  fi
+done
+
+if [[ -z "${PULLED_IMAGE_TAG}" ]]; then
   rollback_state_only "GHCR image pull failed for ${TARGET_TAG} (package may still be publishing)."
 fi
 
