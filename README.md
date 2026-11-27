@@ -17,7 +17,7 @@ Print-Web is a self-service 3D printing portal for 3D Print Lab with a French/En
 - Teacher workspace for managing classes, student DA whitelists, per-student filament limits, and class print queues.
 - Role-based access control (Student, Teacher, Admin) with permission presets and per-user overrides.
 - OrcaSlicer `.json` and selective PrusaSlicer `.ini` profile import, bound to printers and MMU slots.
-- Live printer and MMU slot sync with FDM Monster and FilamentAPI.
+- Live printer and MMU slot sync with FDM Monster and [FilamentAPI](https://github.com/weegeeday/FilamentAPI).
 - Docker Compose production stack (`postgres:16-alpine`, FastAPI backend, Nginx frontend) with pre-built `linux/amd64` and `linux/arm64` images on GHCR.
 
 ## Supported Architectures
