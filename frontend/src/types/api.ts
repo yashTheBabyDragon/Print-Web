@@ -284,6 +284,7 @@ export interface OrcaCatalogMachinePreset {
   bed_z_mm: number;
   mmu_slots_count: number;
   printer_type: PrinterType;
+  default_print_profile?: string;
 }
 
 export interface OrcaCatalogProcessPreset {

@@ -250,6 +250,7 @@ class OrcaCatalogMachinePresetOut(BaseModel):
     bed_z_mm: float = 220.0
     mmu_slots_count: int = 1
     printer_type: str = "prusalink"
+    default_print_profile: str = ""
 
 
 class OrcaCatalogProcessPresetOut(BaseModel):

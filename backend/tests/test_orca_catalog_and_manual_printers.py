@@ -17,6 +17,7 @@ from app.services import fdm_monster
 from app.services.orca_catalog import (
     OrcaCatalogIndex,
     clear_orca_catalog_cache,
+    evaluate_compatible_printers_condition,
     extract_machine_metadata,
     parse_opc_file,
 )
@@ -395,3 +396,200 @@ def test_orca_catalog_import_endpoints_with_mocked_catalog_dir(
         prof = db.get(OrcaProfile, imp["machine_profile"]["id"])
         assert prof is not None
         assert json.loads(Path(prof.file_path).read_text(encoding="utf-8"))["gcode_flavor"] == "klipper"
+
+
+def test_evaluate_compatible_printers_condition_expressions() -> None:
+    mk4s = {
+        "printer_model": "Prusa MK4S",
+        "nozzle_diameter": ["0.4"],
+        "printer_notes": "Don't remove!\nPRINTER_MODEL_MK4S\nPG\nNO_TEMPLATES",
+        "single_extruder_multi_material": "0",
+    }
+    mk4s_hf = {
+        "printer_model": "Prusa MK4S HF",
+        "nozzle_diameter": ["0.4"],
+        "printer_notes": "PRINTER_MODEL_MK4S\nHF_NOZZLE\nPG",
+    }
+    core_one = {
+        "printer_model": "Prusa CORE One",
+        "nozzle_diameter": ["0.4"],
+        "printer_notes": "PRINTER_MODEL_COREONE\nPG",
+    }
+    core_one_l = {
+        "printer_model": "Prusa CORE One L",
+        "nozzle_diameter": ["0.4"],
+        "printer_notes": "PRINTER_MODEL_COREONE_L\nPG",
+    }
+    mmu3 = {
+        "printer_model": "Prusa MK4S MMU3",
+        "nozzle_diameter": ["0.4"],
+        "printer_notes": "PRINTER_MODEL_MK4S\nPG",
+        "single_extruder_multi_material": "1",
+    }
+
+    mk4s_std_cond = "printer_notes=~/.*MK4S.*/ and nozzle_diameter[0]==0.4 and printer_notes!~/.*HF_NOZZLE.*/"
+    assert evaluate_compatible_printers_condition(mk4s_std_cond, mk4s) is True
+    assert evaluate_compatible_printers_condition(mk4s_std_cond, mk4s_hf) is False
+    assert evaluate_compatible_printers_condition(mk4s_std_cond, core_one) is False
+
+    core_cond = "printer_notes=~/.*PRINTER_MODEL_COREONE[^_a-zA-Z0-9].*/ and nozzle_diameter[0]==0.4"
+    assert evaluate_compatible_printers_condition(core_cond, core_one) is True
+    assert evaluate_compatible_printers_condition(core_cond, core_one_l) is False
+    assert evaluate_compatible_printers_condition(core_cond, mk4s) is False
+
+    mmu_cond = "(printer_notes=~/.*MK4S.*/ or printer_notes=~/.*COREONE.*/) and nozzle_diameter[0]==0.4 and single_extruder_multi_material"
+    assert evaluate_compatible_printers_condition(mmu_cond, mmu3) is True
+    assert evaluate_compatible_printers_condition(mmu_cond, mk4s) is False
+
+    # Malformed or unclosed expressions fail safe to False instead of raising
+    assert evaluate_compatible_printers_condition("printer_notes=~/unclosed", mk4s) is False
+    assert evaluate_compatible_printers_condition("((broken syntax", mk4s) is False
+
+
+def test_catalog_resolves_condition_and_precedence_for_multi_model_vendor(tmp_path: Path) -> None:
+    clear_orca_catalog_cache()
+    pdir = tmp_path / "profiles"
+    vdir = pdir / "Prusa"
+    (vdir / "machine").mkdir(parents=True)
+    (vdir / "process").mkdir(parents=True)
+    (vdir / "filament").mkdir(parents=True)
+
+    (pdir / "Prusa.json").write_text(
+        json.dumps(
+            {
+                "name": "Prusa Research",
+                "version": "1.0",
+                "machine_model_list": [
+                    {"name": "Prusa MK4S", "nozzle_diameter": "0.4"},
+                    {"name": "Prusa CORE One", "nozzle_diameter": "0.4"},
+                    {"name": "Prusa CORE One L", "nozzle_diameter": "0.4"},
+                    {"name": "Prusa MK3S", "nozzle_diameter": "0.25;0.4"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _w(sub: str, name: str, payload: dict) -> None:
+        (vdir / sub / f"{name}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    _w(
+        "machine",
+        "Prusa MK4S 0.4 nozzle",
+        {
+            "name": "Prusa MK4S 0.4 nozzle",
+            "instantiation": "true",
+            "printer_model": "Prusa MK4S",
+            "nozzle_diameter": ["0.4"],
+            "default_print_profile": "0.20mm SPEED @MK4S 0.4",
+            "printer_notes": "PRINTER_MODEL_MK4S\nPG",
+        },
+    )
+    _w(
+        "machine",
+        "Prusa MK4S HF0.4 nozzle",
+        {
+            "name": "Prusa MK4S HF0.4 nozzle",
+            "instantiation": "true",
+            "printer_model": "Prusa MK4S",
+            "nozzle_diameter": ["0.4"],
+            "default_print_profile": "0.20mm SPEED @MK4S HF0.4",
+            "printer_notes": "PRINTER_MODEL_MK4S\nHF_NOZZLE\nPG",
+        },
+    )
+    _w(
+        "machine",
+        "Prusa CORE One 0.4 nozzle",
+        {
+            "name": "Prusa CORE One 0.4 nozzle",
+            "instantiation": "true",
+            "printer_model": "Prusa CORE One",
+            "nozzle_diameter": ["0.4"],
+            "default_print_profile": "0.20mm SPEED @CORE One 0.4",
+            "printer_notes": "PRINTER_MODEL_COREONE\nPG",
+        },
+    )
+    _w(
+        "machine",
+        "Prusa CORE One L 0.4 nozzle",
+        {
+            "name": "Prusa CORE One L 0.4 nozzle",
+            "instantiation": "true",
+            "printer_model": "Prusa CORE One L",
+            "nozzle_diameter": ["0.4"],
+            "default_print_profile": "0.20mm SPEED @CORE One L 0.4",
+            "printer_notes": "PRINTER_MODEL_COREONE_L\nPG",
+        },
+    )
+    _w(
+        "machine",
+        "Prusa MK3S 0.25 nozzle",
+        {
+            "name": "Prusa MK3S 0.25 nozzle",
+            "instantiation": "true",
+            "printer_model": "Prusa MK3S",
+            "nozzle_diameter": ["0.25"],
+            "printer_notes": "PRINTER_MODEL_MK3S",
+        },
+    )
+
+    _w(
+        "process",
+        "0.20mm SPEED @MK4S 0.4",
+        {
+            "name": "0.20mm SPEED @MK4S 0.4",
+            "instantiation": "true",
+            "layer_height": "0.2",
+            "compatible_printers": [],
+            "compatible_printers_condition": "printer_notes=~/.*MK4S.*/ and nozzle_diameter[0]==0.4 and printer_notes!~/.*HF_NOZZLE.*/",
+        },
+    )
+    _w(
+        "process",
+        "0.20mm SPEED @CORE One 0.4",
+        {
+            "name": "0.20mm SPEED @CORE One 0.4",
+            "instantiation": "true",
+            "layer_height": "0.2",
+            "compatible_printers": [],
+            "compatible_printers_condition": "printer_notes=~/.*PRINTER_MODEL_COREONE[^_a-zA-Z0-9].*/ and nozzle_diameter[0]==0.4",
+        },
+    )
+    _w(
+        "process",
+        "0.10mm Detail @MK3S 0.25",
+        {
+            "name": "0.10mm Detail @MK3S 0.25",
+            "instantiation": "true",
+            "layer_height": "0.1",
+            "compatible_printers": ["Prusa MK3S 0.25 nozzle"],
+            # Inherited parent condition that would reject 0.25 if explicit list didn't take precedence
+            "compatible_printers_condition": "printer_notes=~/.*PRINTER_MODEL_MK3.*/ and nozzle_diameter[0]==0.4",
+        },
+    )
+    _w(
+        "filament",
+        "Prusament PLA @MK4S cond",
+        {
+            "name": "Prusament PLA @MK4S cond",
+            "instantiation": "true",
+            "filament_type": ["PLA"],
+            "compatible_printers": [],
+            "compatible_printers_condition": "printer_notes=~/.*MK4S.*/ and nozzle_diameter[0]==0.4 and printer_notes!~/.*HF_NOZZLE.*/",
+        },
+    )
+
+    idx = OrcaCatalogIndex([pdir])
+    detail = idx.get_vendor_detail("Prusa")
+
+    machines = {m["name"]: m for m in detail["machine_presets"]}
+    assert machines["Prusa MK4S 0.4 nozzle"]["default_print_profile"] == "0.20mm SPEED @MK4S 0.4"
+    assert machines["Prusa CORE One 0.4 nozzle"]["default_print_profile"] == "0.20mm SPEED @CORE One 0.4"
+
+    procs = {p["name"]: p for p in detail["process_presets"]}
+    assert procs["0.20mm SPEED @MK4S 0.4"]["compatible_printers"] == ["Prusa MK4S 0.4 nozzle"]
+    assert procs["0.20mm SPEED @CORE One 0.4"]["compatible_printers"] == ["Prusa CORE One 0.4 nozzle"]
+    assert procs["0.10mm Detail @MK3S 0.25"]["compatible_printers"] == ["Prusa MK3S 0.25 nozzle"]
+
+    fils = {f["preset_name"]: f for f in detail["filaments"]}
+    assert fils["Prusament PLA @MK4S cond"]["compatible_printers"] == ["Prusa MK4S 0.4 nozzle"]

@@ -10,6 +10,7 @@ import struct
 import threading
 import zipfile
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -190,6 +191,371 @@ def extract_filament_metadata(
         "color_hex": color_hex,
         "notes": " · ".join(notes_parts),
     }
+
+
+@dataclass(frozen=True)
+class _CondToken:
+    kind: str  # OR, AND, NOT, LPAREN, RPAREN, LBRACK, RBRACK, OP, REGEX, STR, NUM, BOOL, IDENT
+    value: Any
+
+
+_TWO_CHAR_OPS = ("=~", "!~", "==", "!=", "<=", ">=", "&&", "||")
+_TRUTHY_FALSE = {"", "0", "false", "no", "off", "nil"}
+
+
+def _tokenize_condition(expr: str) -> list[_CondToken]:
+    tokens: list[_CondToken] = []
+    i = 0
+    n = len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch.isspace():
+            i += 1
+            continue
+        two = expr[i : i + 2]
+        if two in _TWO_CHAR_OPS:
+            if two == "&&":
+                tokens.append(_CondToken("AND", two))
+            elif two == "||":
+                tokens.append(_CondToken("OR", two))
+            else:
+                tokens.append(_CondToken("OP", two))
+            i += 2
+            continue
+        if ch == "(":
+            tokens.append(_CondToken("LPAREN", ch))
+            i += 1
+            continue
+        if ch == ")":
+            tokens.append(_CondToken("RPAREN", ch))
+            i += 1
+            continue
+        if ch == "[":
+            tokens.append(_CondToken("LBRACK", ch))
+            i += 1
+            continue
+        if ch == "]":
+            tokens.append(_CondToken("RBRACK", ch))
+            i += 1
+            continue
+        if ch == "!":
+            tokens.append(_CondToken("NOT", ch))
+            i += 1
+            continue
+        if ch in ("<", ">"):
+            tokens.append(_CondToken("OP", ch))
+            i += 1
+            continue
+        if ch == "/":
+            i += 1
+            chars: list[str] = []
+            closed = False
+            while i < n:
+                c = expr[i]
+                if c == "\\" and i + 1 < n:
+                    nxt = expr[i + 1]
+                    if nxt == "/":
+                        chars.append("/")
+                    else:
+                        chars.append(c)
+                        chars.append(nxt)
+                    i += 2
+                    continue
+                if c == "/":
+                    i += 1
+                    closed = True
+                    break
+                chars.append(c)
+                i += 1
+            if not closed:
+                raise ValueError("Unterminated regex literal")
+            pattern = re.compile("".join(chars), re.DOTALL)
+            tokens.append(_CondToken("REGEX", pattern))
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            i += 1
+            chars = []
+            closed = False
+            while i < n:
+                c = expr[i]
+                if c == "\\" and i + 1 < n:
+                    chars.append(expr[i + 1])
+                    i += 2
+                    continue
+                if c == quote:
+                    i += 1
+                    closed = True
+                    break
+                chars.append(c)
+                i += 1
+            if not closed:
+                raise ValueError("Unterminated string literal")
+            tokens.append(_CondToken("STR", "".join(chars)))
+            continue
+        if ch.isdigit() or (ch == "-" and i + 1 < n and expr[i + 1].isdigit()):
+            j = i + 1
+            has_dot = False
+            while j < n and (expr[j].isdigit() or (expr[j] == "." and not has_dot)):
+                if expr[j] == ".":
+                    has_dot = True
+                j += 1
+            tokens.append(_CondToken("NUM", float(expr[i:j])))
+            i = j
+            continue
+        if ch.isalpha() or ch == "_":
+            j = i + 1
+            while j < n and (expr[j].isalnum() or expr[j] == "_"):
+                j += 1
+            word = expr[i:j]
+            low = word.lower()
+            if low == "and":
+                tokens.append(_CondToken("AND", word))
+            elif low == "or":
+                tokens.append(_CondToken("OR", word))
+            elif low == "not":
+                tokens.append(_CondToken("NOT", word))
+            elif low == "true":
+                tokens.append(_CondToken("BOOL", True))
+            elif low == "false":
+                tokens.append(_CondToken("BOOL", False))
+            else:
+                tokens.append(_CondToken("IDENT", word))
+            i = j
+            continue
+        raise ValueError(f"Unexpected character {ch!r} in condition")
+    return tokens
+
+
+@lru_cache(maxsize=512)
+def _compile_condition(expr: str) -> Any:
+    tokens = _tokenize_condition(expr)
+    pos = 0
+    total = len(tokens)
+
+    def _peek() -> Optional[_CondToken]:
+        return tokens[pos] if pos < total else None
+
+    def _consume(kind: Optional[str] = None) -> _CondToken:
+        nonlocal pos
+        if pos >= total:
+            raise ValueError("Unexpected end of condition")
+        tok = tokens[pos]
+        if kind is not None and tok.kind != kind:
+            raise ValueError(f"Expected {kind}, got {tok.kind}")
+        pos += 1
+        return tok
+
+    def _parse_or() -> Any:
+        node = _parse_and()
+        while (tok := _peek()) is not None and tok.kind == "OR":
+            _consume("OR")
+            rhs = _parse_and()
+            node = ("or", node, rhs)
+        return node
+
+    def _parse_and() -> Any:
+        node = _parse_not()
+        while (tok := _peek()) is not None and tok.kind == "AND":
+            _consume("AND")
+            rhs = _parse_not()
+            node = ("and", node, rhs)
+        return node
+
+    def _parse_not() -> Any:
+        if (tok := _peek()) is not None and tok.kind == "NOT":
+            _consume("NOT")
+            return ("not", _parse_not())
+        return _parse_comparison()
+
+    def _parse_operand() -> Any:
+        tok = _peek()
+        if tok is None:
+            raise ValueError("Expected operand")
+        if tok.kind == "IDENT":
+            name = _consume("IDENT").value
+            idx: Optional[int] = None
+            if (nxt := _peek()) is not None and nxt.kind == "LBRACK":
+                _consume("LBRACK")
+                num_tok = _consume("NUM")
+                _consume("RBRACK")
+                idx = int(num_tok.value)
+            return ("var", name, idx)
+        if tok.kind in ("STR", "NUM", "BOOL", "REGEX"):
+            _consume()
+            return ("lit", tok.kind, tok.value)
+        raise ValueError(f"Unexpected token {tok.kind}")
+
+    def _parse_comparison() -> Any:
+        tok = _peek()
+        if tok is not None and tok.kind == "LPAREN":
+            _consume("LPAREN")
+            inner = _parse_or()
+            _consume("RPAREN")
+            return inner
+        lhs = _parse_operand()
+        nxt = _peek()
+        if nxt is not None and nxt.kind == "OP":
+            op = _consume("OP").value
+            rhs = _parse_operand()
+            return ("cmp", op, lhs, rhs)
+        return ("truthy", lhs)
+
+    ast = _parse_or()
+    if pos != total:
+        raise ValueError(f"Trailing tokens at position {pos}")
+    return ast
+
+
+def _resolve_var(machine_flat: dict[str, Any], name: str, idx: Optional[int]) -> Any:
+    if name not in machine_flat:
+        return ""
+    val = machine_flat.get(name)
+    if val is None:
+        return ""
+    if idx is not None:
+        if isinstance(val, list):
+            return val[idx] if 0 <= idx < len(val) else ""
+        return val if idx == 0 else ""
+    if isinstance(val, list):
+        if name == "printer_notes":
+            return "\n".join(str(x) for x in val)
+        return _first_str(val) or ""
+    if isinstance(val, bool):
+        return "1" if val else "0"
+    return val
+
+
+def _to_str(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "1" if val else "0"
+    return str(val)
+
+
+def _to_float(val: Any) -> Optional[float]:
+    if isinstance(val, bool):
+        return 1.0 if val else 0.0
+    if isinstance(val, (int, float)):
+        return None if (math.isnan(val) or math.isinf(val)) else float(val)
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        f = float(s)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    except ValueError:
+        return None
+
+
+def _is_truthy(val: Any) -> bool:
+    if isinstance(val, bool):
+        return val
+    return str(val or "").strip().lower() not in _TRUTHY_FALSE
+
+
+def _eval_operand(node: Any, machine_flat: dict[str, Any]) -> Any:
+    if node[0] == "var":
+        return _resolve_var(machine_flat, node[1], node[2])
+    return node[2]
+
+
+def _eval_condition_ast(node: Any, machine_flat: dict[str, Any]) -> bool:
+    kind = node[0]
+    if kind == "or":
+        return _eval_condition_ast(node[1], machine_flat) or _eval_condition_ast(node[2], machine_flat)
+    if kind == "and":
+        return _eval_condition_ast(node[1], machine_flat) and _eval_condition_ast(node[2], machine_flat)
+    if kind == "not":
+        return not _eval_condition_ast(node[1], machine_flat)
+    if kind == "truthy":
+        return _is_truthy(_eval_operand(node[1], machine_flat))
+    if kind == "cmp":
+        _, op, lhs_node, rhs_node = node
+        lhs = _eval_operand(lhs_node, machine_flat)
+        rhs = _eval_operand(rhs_node, machine_flat)
+        if op in ("=~", "!~"):
+            lhs_s = _to_str(lhs)
+            if isinstance(rhs, re.Pattern):
+                matched = bool(rhs.fullmatch(lhs_s))
+            else:
+                try:
+                    matched = bool(re.compile(str(rhs), re.DOTALL).fullmatch(lhs_s))
+                except re.error:
+                    return False
+            return matched if op == "=~" else not matched
+
+        if isinstance(lhs, bool) or isinstance(rhs, bool):
+            lb = _is_truthy(lhs)
+            rb = _is_truthy(rhs)
+            if op == "==":
+                return lb == rb
+            if op == "!=":
+                return lb != rb
+
+        lf = _to_float(lhs)
+        rf = _to_float(rhs)
+        if lf is not None and rf is not None:
+            if op == "==":
+                return math.isclose(lf, rf, rel_tol=1e-9, abs_tol=1e-9)
+            if op == "!=":
+                return not math.isclose(lf, rf, rel_tol=1e-9, abs_tol=1e-9)
+            if op == "<":
+                return lf < rf
+            if op == "<=":
+                return lf <= rf
+            if op == ">":
+                return lf > rf
+            if op == ">=":
+                return lf >= rf
+
+        ls = _to_str(lhs)
+        rs = _to_str(rhs)
+        if op == "==":
+            return ls == rs
+        if op == "!=":
+            return ls != rs
+        if op == "<":
+            return ls < rs
+        if op == "<=":
+            return ls <= rs
+        if op == ">":
+            return ls > rs
+        if op == ">=":
+            return ls >= rs
+    return False
+
+
+def evaluate_compatible_printers_condition(expr: str, machine_flat: dict[str, Any]) -> bool:
+    """Safely evaluate an OrcaSlicer/PrusaSlicer compatible_printers_condition expression."""
+    cleaned = (expr or "").strip()
+    if not cleaned:
+        return True
+    try:
+        ast = _compile_condition(cleaned)
+        return _eval_condition_ast(ast, machine_flat)
+    except Exception:
+        return False
+
+
+def _resolve_compatible_printers(
+    flat: dict[str, Any],
+    flat_machines: list[tuple[str, dict[str, Any]]],
+) -> list[str]:
+    """Resolve compatible machine preset names from explicit list or condition expression."""
+    compat = flat.get("compatible_printers")
+    compat_list = [str(c).strip() for c in compat if str(c).strip()] if isinstance(compat, list) else []
+    if compat_list:
+        return compat_list
+    cpc = str(flat.get("compatible_printers_condition") or "").strip()
+    if not cpc:
+        return []
+    return [
+        m_name
+        for m_name, m_flat in flat_machines
+        if evaluate_compatible_printers_condition(cpc, m_flat)
+    ]
 
 
 @dataclass
@@ -668,6 +1034,7 @@ class OrcaCatalogIndex:
         # Instantiable machine presets indexed cleanly
         machine_presets: list[dict[str, Any]] = []
         machines_by_model: dict[str, list[dict[str, Any]]] = {}
+        flat_machines: list[tuple[str, dict[str, Any]]] = []
         for (kind, pname), pdata in bundle.presets.items():
             if kind != "machine" or str(pdata.get("instantiation", "")).lower() != "true":
                 continue
@@ -675,6 +1042,7 @@ class OrcaCatalogIndex:
                 flat = self.flatten_preset("machine", pname, vendor_id=vendor_id)
             except KeyError:
                 flat = pdata
+            flat_machines.append((pname, flat))
             meta = extract_machine_metadata(flat)
             p_model = str(flat.get("printer_model") or "").strip()
             item = {
@@ -687,12 +1055,14 @@ class OrcaCatalogIndex:
                 "bed_z_mm": meta["bed_z_mm"],
                 "mmu_slots_count": meta["mmu_slots_count"],
                 "printer_type": meta["printer_type"],
+                "default_print_profile": str(flat.get("default_print_profile") or "").strip(),
             }
             machine_presets.append(item)
             if p_model:
                 machines_by_model.setdefault(p_model, []).append(item)
 
         machine_presets.sort(key=lambda x: x["name"].lower())
+        flat_machines.sort(key=lambda x: x[0].lower())
 
         models_out: list[dict[str, Any]] = []
         for m in bundle.models:
@@ -738,8 +1108,7 @@ class OrcaCatalogIndex:
                 flat = self.flatten_preset("process", pname, vendor_id=vendor_id)
             except KeyError:
                 flat = pdata
-            compat = flat.get("compatible_printers")
-            compat_list = [str(c).strip() for c in compat if str(c).strip()] if isinstance(compat, list) else []
+            compat_list = _resolve_compatible_printers(flat, flat_machines)
             process_presets.append(
                 {
                     "name": pname,
@@ -769,12 +1138,7 @@ class OrcaCatalogIndex:
                 except KeyError:
                     flat = pdata
                 fmeta = extract_filament_metadata(flat, fallback_name=pname)
-                compat = flat.get("compatible_printers")
-                compat_list = (
-                    [str(c).strip() for c in compat if str(c).strip()]
-                    if isinstance(compat, list)
-                    else []
-                )
+                compat_list = _resolve_compatible_printers(flat, flat_machines)
                 filaments_out.append(
                     {
                         "preset_name": pname,

@@ -16,6 +16,8 @@ import type {
   AdminPrinter,
   FdmMonsterRemotePrinter,
   Filament,
+  OrcaCatalogMachinePreset,
+  OrcaCatalogProcessPreset,
   OrcaCatalogVendorDetail,
   OrcaCatalogVendorSummary,
   OrcaProfile,
@@ -35,6 +37,45 @@ interface AddPrinterModalProps {
 }
 
 const MATERIAL_FILTERS = ['ALL', 'PLA', 'PETG', 'ABS', 'ASA', 'TPU', 'PA'] as const;
+
+function pickPreferredMachinePreset(
+  modelPresetNames: string[],
+  allMachinePresets: OrcaCatalogMachinePreset[]
+): string {
+  const byName = new Map(allMachinePresets.map((mp) => [mp.name, mp]));
+  const candidates =
+    modelPresetNames.length > 0
+      ? modelPresetNames
+          .map((name) => byName.get(name))
+          .filter((mp): mp is OrcaCatalogMachinePreset => Boolean(mp))
+      : allMachinePresets;
+  if (candidates.length === 0) {
+    return modelPresetNames[0] || '';
+  }
+  const isNozzle04 = (mp: OrcaCatalogMachinePreset) =>
+    mp.nozzle_diameter === '0.4' || /\b0\.4\b/.test(mp.name);
+  const preferred =
+    candidates.find((mp) => isNozzle04(mp) && !/\bhf/i.test(mp.name)) ??
+    candidates.find(isNozzle04) ??
+    candidates[0];
+  return preferred.name;
+}
+
+function pickPreferredProcessPreset(
+  compatible: OrcaCatalogProcessPreset[],
+  machinePreset?: OrcaCatalogMachinePreset | null
+): string {
+  if (compatible.length === 0) return '';
+  if (machinePreset?.default_print_profile) {
+    const exactDefault = compatible.find((p) => p.name === machinePreset.default_print_profile);
+    if (exactDefault) return exactDefault.name;
+  }
+  const preferred =
+    compatible.find((p) => /0\.20mm.*(?:standard|speed|balanced|structural|quality)/i.test(p.name)) ??
+    compatible.find((p) => /0\.20mm/i.test(p.name)) ??
+    compatible[0];
+  return preferred.name;
+}
 
 function parseMachineJsonMetadata(text: string): {
   name?: string;
@@ -126,6 +167,8 @@ export function AddPrinterModal({
   const [filamentSearch, setFilamentSearch] = useState('');
   const [filamentMatFilter, setFilamentMatFilter] = useState<string>('ALL');
   const [selectedFilamentPresets, setSelectedFilamentPresets] = useState<string[]>([]);
+  const [showAllProcessPresets, setShowAllProcessPresets] = useState(false);
+  const [showAllFilaments, setShowAllFilaments] = useState(false);
   const [brokenCovers, setBrokenCovers] = useState<Record<string, boolean>>({});
 
   // Shared printer metadata
@@ -196,6 +239,8 @@ export function AddPrinterModal({
     setSelectedMachinePreset('');
     setSelectedProcessPreset('');
     setSelectedFilamentPresets([]);
+    setShowAllProcessPresets(false);
+    setShowAllFilaments(false);
     setVendorSearch('');
     setModelSearch('');
     setFilamentSearch('');
@@ -242,24 +287,26 @@ export function AddPrinterModal({
       .then((detail) => {
         if (!active) return;
         setVendorDetail(detail);
+        setShowAllProcessPresets(false);
+        setShowAllFilaments(false);
         const firstModel = detail.models[0] ?? null;
+        const mp = firstModel
+          ? pickPreferredMachinePreset(firstModel.machine_presets, detail.machine_presets)
+          : pickPreferredMachinePreset([], detail.machine_presets);
         if (firstModel) {
           setSelectedModelId(firstModel.id);
-          const mp = firstModel.machine_presets[0] || detail.machine_presets[0]?.name || '';
           setSelectedMachinePreset(mp);
           if (!targetPrinter) {
             setDisplayName(mp || firstModel.name);
           }
         } else {
           setSelectedModelId('');
-          const mp = detail.machine_presets[0]?.name || '';
           setSelectedMachinePreset(mp);
           if (!targetPrinter) {
             setDisplayName(mp);
           }
         }
-        const proc = detail.process_presets[0]?.name || '';
-        setSelectedProcessPreset(proc);
+        setSelectedProcessPreset('');
         setSelectedFilamentPresets([]);
       })
       .catch((err) => {
@@ -307,40 +354,78 @@ export function AddPrinterModal({
     return vendorDetail.machine_presets;
   }, [vendorDetail, activeModel]);
 
-  const visibleProcessPresets = useMemo(() => {
+  const activeMachinePreset = useMemo(
+    () => vendorDetail?.machine_presets.find((mp) => mp.name === selectedMachinePreset) ?? null,
+    [vendorDetail, selectedMachinePreset]
+  );
+
+  const compatibleProcessPresets = useMemo(() => {
     if (!vendorDetail) return [];
     if (!selectedMachinePreset) return vendorDetail.process_presets;
-    const compat: typeof vendorDetail.process_presets = [];
-    const generic: typeof vendorDetail.process_presets = [];
-    for (const pp of vendorDetail.process_presets) {
-      if (pp.compatible_printers.includes(selectedMachinePreset)) {
-        compat.push(pp);
-      } else {
-        generic.push(pp);
-      }
-    }
-    return compat.length > 0 ? [...compat, ...generic] : vendorDetail.process_presets;
+    const direct = vendorDetail.process_presets.filter((pp) =>
+      pp.compatible_printers.includes(selectedMachinePreset)
+    );
+    if (direct.length > 0) return direct;
+    const universal = vendorDetail.process_presets.filter(
+      (pp) => pp.compatible_printers.length === 0
+    );
+    return universal.length > 0 ? universal : vendorDetail.process_presets;
   }, [vendorDetail, selectedMachinePreset]);
+
+  const visibleProcessPresets = useMemo(() => {
+    if (!vendorDetail) return [];
+    if (!showAllProcessPresets) return compatibleProcessPresets;
+    const compatNames = new Set(compatibleProcessPresets.map((pp) => pp.name));
+    const rest = vendorDetail.process_presets.filter((pp) => !compatNames.has(pp.name));
+    return [...compatibleProcessPresets, ...rest];
+  }, [vendorDetail, compatibleProcessPresets, showAllProcessPresets]);
+
+  const hasHiddenProcessPresets = Boolean(
+    selectedMachinePreset &&
+      vendorDetail &&
+      compatibleProcessPresets.length > 0 &&
+      compatibleProcessPresets.length < vendorDetail.process_presets.length
+  );
 
   // Auto-select compatible process preset when machine preset changes
   useEffect(() => {
     if (!vendorDetail || !selectedMachinePreset) return;
-    const compat = vendorDetail.process_presets.filter((p) =>
-      p.compatible_printers.includes(selectedMachinePreset)
+    setSelectedProcessPreset(
+      pickPreferredProcessPreset(compatibleProcessPresets, activeMachinePreset)
     );
-    if (compat.length > 0 && !compat.some((p) => p.name === selectedProcessPreset)) {
-      const preferred =
-        compat.find((p) => /0\.20mm.*standard/i.test(p.name)) ??
-        compat.find((p) => /0\.20mm/i.test(p.name)) ??
-        compat[0];
-      setSelectedProcessPreset(preferred.name);
-    }
-  }, [vendorDetail, selectedMachinePreset, selectedProcessPreset]);
+  }, [vendorDetail, selectedMachinePreset, activeMachinePreset, compatibleProcessPresets]);
+
+  const compatibleFilaments = useMemo(() => {
+    if (!vendorDetail) return [];
+    if (!selectedMachinePreset) return vendorDetail.filaments;
+    const matching = vendorDetail.filaments.filter(
+      (f) => f.compatible_printers.length === 0 || f.compatible_printers.includes(selectedMachinePreset)
+    );
+    const base = matching.length > 0 ? matching : vendorDetail.filaments;
+    return [...base].sort((a, b) => {
+      const aDirect = a.compatible_printers.includes(selectedMachinePreset) ? 0 : 1;
+      const bDirect = b.compatible_printers.includes(selectedMachinePreset) ? 0 : 1;
+      return aDirect - bDirect;
+    });
+  }, [vendorDetail, selectedMachinePreset]);
+
+  const hasHiddenFilaments = Boolean(
+    selectedMachinePreset &&
+      vendorDetail &&
+      compatibleFilaments.length > 0 &&
+      compatibleFilaments.length < vendorDetail.filaments.length
+  );
 
   const visibleFilaments = useMemo(() => {
     if (!vendorDetail) return [];
+    let source = compatibleFilaments;
+    if (showAllFilaments) {
+      const compatNames = new Set(compatibleFilaments.map((f) => f.preset_name));
+      const rest = vendorDetail.filaments.filter((f) => !compatNames.has(f.preset_name));
+      source = [...compatibleFilaments, ...rest];
+    }
     const q = filamentSearch.trim().toLowerCase();
-    return vendorDetail.filaments.filter((f) => {
+    return source.filter((f) => {
       if (filamentMatFilter !== 'ALL' && !f.material.toUpperCase().includes(filamentMatFilter)) {
         return false;
       }
@@ -349,7 +434,17 @@ export function AddPrinterModal({
       }
       return true;
     });
-  }, [vendorDetail, filamentSearch, filamentMatFilter]);
+  }, [vendorDetail, compatibleFilaments, showAllFilaments, filamentSearch, filamentMatFilter]);
+
+  // Prune selected filaments that are incompatible with a newly selected machine preset
+  useEffect(() => {
+    if (!selectedMachinePreset || showAllFilaments) return;
+    const allowed = new Set(compatibleFilaments.map((f) => f.preset_name));
+    setSelectedFilamentPresets((prev) => {
+      const next = prev.filter((name) => allowed.has(name));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [selectedMachinePreset, showAllFilaments, compatibleFilaments]);
 
   const toggleFilamentPreset = (presetName: string) => {
     setSelectedFilamentPresets((prev) =>
@@ -620,9 +715,13 @@ export function AddPrinterModal({
                             type="button"
                             onClick={() => {
                               setSelectedModelId(m.id);
-                              const firstPreset =
-                                m.machine_presets[0] || vendorDetail?.machine_presets[0]?.name || '';
+                              const firstPreset = pickPreferredMachinePreset(
+                                m.machine_presets,
+                                vendorDetail?.machine_presets ?? []
+                              );
                               setSelectedMachinePreset(firstPreset);
+                              setShowAllProcessPresets(false);
+                              setShowAllFilaments(false);
                               if (!targetPrinter) {
                                 setDisplayName(firstPreset || m.name);
                               }
@@ -667,6 +766,8 @@ export function AddPrinterModal({
                           value={selectedMachinePreset}
                           onChange={(e) => {
                             setSelectedMachinePreset(e.target.value);
+                            setShowAllProcessPresets(false);
+                            setShowAllFilaments(false);
                             if (!targetPrinter) setDisplayName(e.target.value);
                           }}
                           className="studio-input py-1.5 text-xs"
@@ -681,10 +782,31 @@ export function AddPrinterModal({
                       </div>
 
                       <div>
-                        <label className="mb-1 block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]">
-                          {isFr ? 'Profil procédé par défaut' : 'Default process preset'}
-                        </label>
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <label
+                            htmlFor="catalog-process-preset"
+                            className="block text-[11px] font-medium text-[#5B616E] dark:text-[#9399A6]"
+                          >
+                            {isFr ? 'Profil procédé par défaut' : 'Default process preset'}
+                          </label>
+                          {hasHiddenProcessPresets && vendorDetail && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllProcessPresets((prev) => !prev)}
+                              className="text-[10px] font-medium text-[#007BA3] hover:underline dark:text-[#38C6F4]"
+                            >
+                              {showAllProcessPresets
+                                ? isFr
+                                  ? `Compatibles uniquement (${compatibleProcessPresets.length})`
+                                  : `Compatible only (${compatibleProcessPresets.length})`
+                                : isFr
+                                  ? `Tout afficher (${vendorDetail.process_presets.length})`
+                                  : `Show all (${vendorDetail.process_presets.length})`}
+                            </button>
+                          )}
+                        </div>
                         <select
+                          id="catalog-process-preset"
                           value={selectedProcessPreset}
                           onChange={(e) => setSelectedProcessPreset(e.target.value)}
                           className="studio-input py-1.5 text-xs"
@@ -752,13 +874,30 @@ export function AddPrinterModal({
 
               {/* Column 3: Filaments selector */}
               <div className="flex flex-col space-y-2.5 p-4 md:col-span-4 md:overflow-y-auto">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-semibold">
                     {isFr ? 'Filaments à importer' : 'Filaments to import'}
                   </span>
-                  <span className="rounded-full bg-[#00A7D9]/12 px-2 py-0.5 font-mono text-[10px] font-medium text-[#007BA3] dark:text-[#38C6F4]">
-                    {selectedFilamentPresets.length}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {hasHiddenFilaments && vendorDetail && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllFilaments((prev) => !prev)}
+                        className="text-[10px] font-medium text-[#007BA3] hover:underline dark:text-[#38C6F4]"
+                      >
+                        {showAllFilaments
+                          ? isFr
+                            ? 'Compatibles'
+                            : 'Compatible only'
+                          : isFr
+                            ? 'Tout'
+                            : 'Show all'}
+                      </button>
+                    )}
+                    <span className="rounded-full bg-[#00A7D9]/12 px-2 py-0.5 font-mono text-[10px] font-medium text-[#007BA3] dark:text-[#38C6F4]">
+                      {selectedFilamentPresets.length}
+                    </span>
+                  </div>
                 </div>
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#8A909E]" />

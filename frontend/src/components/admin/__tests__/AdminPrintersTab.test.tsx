@@ -3,7 +3,13 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../../api/client';
 import { I18nProvider } from '../../../i18n';
-import type { AdminPrinter, Filament, FilamentApiPrinter, OrcaProfile } from '../../../types/api';
+import type {
+  AdminPrinter,
+  Filament,
+  FilamentApiPrinter,
+  OrcaCatalogVendorDetail,
+  OrcaProfile,
+} from '../../../types/api';
 import { AdminPrintersTab } from '../AdminPrintersTab';
 
 const MOCK_PRINTERS: AdminPrinter[] = [
@@ -184,5 +190,196 @@ describe('AdminPrintersTab', () => {
     });
     expect(onReload).toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('filters process presets & filaments strictly to selected printer and auto-selects defaults', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'adminGetOrcaCatalogVendors').mockResolvedValue([
+      {
+        id: 'Prusa',
+        name: 'Prusa Research',
+        version: '1.0',
+        model_count: 2,
+        machine_count: 3,
+        process_count: 3,
+        filament_count: 3,
+        is_library: false,
+      },
+    ]);
+    const prusaDetail: OrcaCatalogVendorDetail = {
+      id: 'Prusa',
+      name: 'Prusa Research',
+      version: '1.0',
+      is_library: false,
+      models: [
+        {
+          id: 'Prusa MK4S',
+          name: 'Prusa MK4S',
+          family: 'MK4',
+          manufacturer: 'Prusa Research',
+          nozzles: ['0.25', '0.4'],
+          default_materials: ['Generic PLA @Prusa MK4S'],
+          cover_url: null,
+          bed_x_mm: 250,
+          bed_y_mm: 210,
+          bed_z_mm: 220,
+          mmu_slots_count: 1,
+          printer_type: 'prusalink',
+          machine_presets: ['Prusa MK4S 0.25 nozzle', 'Prusa MK4S 0.4 nozzle'],
+        },
+        {
+          id: 'Prusa CORE One',
+          name: 'Prusa CORE One',
+          family: 'CORE One',
+          manufacturer: 'Prusa Research',
+          nozzles: ['0.4'],
+          default_materials: ['Generic PLA @Prusa CORE One'],
+          cover_url: null,
+          bed_x_mm: 250,
+          bed_y_mm: 220,
+          bed_z_mm: 270,
+          mmu_slots_count: 1,
+          printer_type: 'prusalink',
+          machine_presets: ['Prusa CORE One 0.4 nozzle'],
+        },
+      ],
+      machine_presets: [
+        {
+          name: 'Prusa MK4S 0.25 nozzle',
+          vendor: 'Prusa',
+          printer_model: 'Prusa MK4S',
+          nozzle_diameter: '0.25',
+          bed_x_mm: 250,
+          bed_y_mm: 210,
+          bed_z_mm: 220,
+          mmu_slots_count: 1,
+          printer_type: 'prusalink',
+          default_print_profile: '0.10mm DETAIL @MK4S 0.25',
+        },
+        {
+          name: 'Prusa MK4S 0.4 nozzle',
+          vendor: 'Prusa',
+          printer_model: 'Prusa MK4S',
+          nozzle_diameter: '0.4',
+          bed_x_mm: 250,
+          bed_y_mm: 210,
+          bed_z_mm: 220,
+          mmu_slots_count: 1,
+          printer_type: 'prusalink',
+          default_print_profile: '0.20mm SPEED @MK4S 0.4',
+        },
+        {
+          name: 'Prusa CORE One 0.4 nozzle',
+          vendor: 'Prusa',
+          printer_model: 'Prusa CORE One',
+          nozzle_diameter: '0.4',
+          bed_x_mm: 250,
+          bed_y_mm: 220,
+          bed_z_mm: 270,
+          mmu_slots_count: 1,
+          printer_type: 'prusalink',
+          default_print_profile: '0.20mm SPEED @CORE One 0.4',
+        },
+      ],
+      process_presets: [
+        {
+          name: '0.10mm DETAIL @MK4S 0.25',
+          vendor: 'Prusa',
+          layer_height: '0.10',
+          compatible_printers: ['Prusa MK4S 0.25 nozzle'],
+        },
+        {
+          name: '0.20mm SPEED @MK4S 0.4',
+          vendor: 'Prusa',
+          layer_height: '0.20',
+          compatible_printers: ['Prusa MK4S 0.4 nozzle'],
+        },
+        {
+          name: '0.20mm SPEED @CORE One 0.4',
+          vendor: 'Prusa',
+          layer_height: '0.20',
+          compatible_printers: ['Prusa CORE One 0.4 nozzle'],
+        },
+      ],
+      filaments: [
+        {
+          preset_name: 'Prusament PLA @MK4S',
+          name: 'Prusament PLA @MK4S',
+          vendor: 'Prusa',
+          material: 'PLA',
+          color_hex: '#00A7D9',
+          density_g_cm3: 1.24,
+          compatible_printers: ['Prusa MK4S 0.4 nozzle'],
+        },
+        {
+          preset_name: 'Prusament PLA @CORE One',
+          name: 'Prusament PLA @CORE One',
+          vendor: 'Prusa',
+          material: 'PLA',
+          color_hex: '#F97316',
+          density_g_cm3: 1.24,
+          compatible_printers: ['Prusa CORE One 0.4 nozzle'],
+        },
+        {
+          preset_name: 'Generic PLA @Universal',
+          name: 'Generic PLA @Universal',
+          vendor: 'OrcaFilamentLibrary',
+          material: 'PLA',
+          color_hex: '#FFFFFF',
+          density_g_cm3: 1.24,
+          compatible_printers: [],
+        },
+      ],
+    };
+    vi.spyOn(api, 'adminGetOrcaCatalogVendorDetail').mockResolvedValue(prusaDetail);
+
+    render(
+      <I18nProvider>
+        <AdminPrintersTab
+          printers={MOCK_PRINTERS}
+          filaments={MOCK_FILAMENTS}
+          profiles={MOCK_PROFILES}
+          filamentApiEnabled={false}
+          filamentApiPrinters={[]}
+          onReload={vi.fn().mockResolvedValue(undefined)}
+          onError={vi.fn()}
+        />
+      </I18nProvider>
+    );
+
+    await user.click(screen.getByRole('button', { name: /Add printer/i }));
+
+    const processSelect = (await screen.findByLabelText(/Default process preset/i)) as HTMLSelectElement;
+    // Prefers 0.4 nozzle machine and auto-selects its default process preset
+    await waitFor(() => {
+      expect(processSelect.value).toBe('0.20mm SPEED @MK4S 0.4');
+    });
+    const mk4sOptionTexts = Array.from(processSelect.options).map((o) => o.text);
+    expect(mk4sOptionTexts).toContain('0.20mm SPEED @MK4S 0.4');
+    expect(mk4sOptionTexts).not.toContain('0.20mm SPEED @CORE One 0.4');
+    expect(mk4sOptionTexts).not.toContain('0.10mm DETAIL @MK4S 0.25');
+
+    // Filaments show MK4S + universal, and hide CORE One
+    expect(screen.getByText('Prusament PLA @MK4S')).toBeInTheDocument();
+    expect(screen.getByText('Generic PLA @Universal')).toBeInTheDocument();
+    expect(screen.queryByText('Prusament PLA @CORE One')).not.toBeInTheDocument();
+
+    // Switch printer model to Prusa CORE One
+    await user.click(screen.getByRole('button', { name: /Prusa CORE One/i }));
+    await waitFor(() => {
+      expect(processSelect.value).toBe('0.20mm SPEED @CORE One 0.4');
+    });
+    const coreOptionTexts = Array.from(processSelect.options).map((o) => o.text);
+    expect(coreOptionTexts).toContain('0.20mm SPEED @CORE One 0.4');
+    expect(coreOptionTexts).not.toContain('0.20mm SPEED @MK4S 0.4');
+    expect(screen.getByText('Prusament PLA @CORE One')).toBeInTheDocument();
+    expect(screen.queryByText('Prusament PLA @MK4S')).not.toBeInTheDocument();
+
+    // Toggling Show all reveals all vendor process presets
+    await user.click(screen.getByRole('button', { name: /Show all \(3\)/i }));
+    const allOptionTexts = Array.from(processSelect.options).map((o) => o.text);
+    expect(allOptionTexts).toContain('0.20mm SPEED @CORE One 0.4');
+    expect(allOptionTexts).toContain('0.20mm SPEED @MK4S 0.4');
+    expect(allOptionTexts).toContain('0.10mm DETAIL @MK4S 0.25');
   });
 });
