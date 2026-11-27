@@ -7,7 +7,6 @@ Requires=docker.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/print-web
-EnvironmentFile=-/opt/print-web/.env
-ExecStart=/opt/print-web/deploy/update-from-release.sh --from-trigger
+ExecStart=/bin/bash /opt/print-web/deploy/update-from-release.sh --from-trigger
 Nice=10
 IOSchedulingClass=idle
